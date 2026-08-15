@@ -126,6 +126,7 @@ class Settings:
     mqtt_username: str | None
     mqtt_password: str | None
     mqtt_tls: bool
+    mqtt_tls_ca_cert: str | None
     mqtt_topic_prefix: str
     mqtt_keepalive_seconds: int
     mqtt_publish_timeout_seconds: float
@@ -244,6 +245,7 @@ class Settings:
             mqtt_username=mqtt_username,
             mqtt_password=mqtt_password,
             mqtt_tls=_boolean(values, "TB_MQTT_TLS", False),
+            mqtt_tls_ca_cert=(values.get("TB_MQTT_TLS_CA_CERT", "").strip() or None),
             mqtt_topic_prefix=mqtt_topic_prefix,
             mqtt_keepalive_seconds=_integer(
                 values, "TB_MQTT_KEEPALIVE_SECONDS", 30, minimum=5

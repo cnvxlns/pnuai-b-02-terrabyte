@@ -56,6 +56,7 @@ class MqttPublisher:
         username: str | None = None,
         password: str | None = None,
         tls: bool = False,
+        tls_ca_cert: str | None = None,
         keepalive_seconds: int = 30,
         publish_timeout_seconds: float = 10.0,
         client_factory: Callable[[], Any] | None = None,
@@ -97,7 +98,12 @@ class MqttPublisher:
         if username:
             self._client.username_pw_set(username, password)
         if tls:
-            self._client.tls_set()
+            # Without a CA file paho trusts only the system bundle, which never
+            # contains a self-signed broker certificate — so TB_MQTT_TLS would
+            # be unusable against the demo broker. Passing the CA explicitly is
+            # what makes a self-signed deployment work, and it still verifies
+            # the certificate rather than disabling the check.
+            self._client.tls_set(ca_certs=tls_ca_cert)
         # paho's own reconnect backoff keeps the socket from hammering the
         # broker; the outbox's exponential backoff in service.py remains the
         # authoritative retry schedule at the application level.

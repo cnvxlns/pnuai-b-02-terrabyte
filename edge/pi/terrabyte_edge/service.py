@@ -27,6 +27,7 @@ def _build_publisher(settings: Settings) -> Publisher:
             username=settings.mqtt_username,
             password=settings.mqtt_password,
             tls=settings.mqtt_tls,
+            tls_ca_cert=settings.mqtt_tls_ca_cert,
             keepalive_seconds=settings.mqtt_keepalive_seconds,
             publish_timeout_seconds=settings.mqtt_publish_timeout_seconds,
         )

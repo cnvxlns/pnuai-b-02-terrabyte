@@ -1,12 +1,21 @@
 [Unit]
 Description=TerraByte Arduino telemetry bridge
+# time-sync matters: the bridge stamps each reading with the Orange Pi's wall
+# clock and refuses to run when it is earlier than TB_CLOCK_MINIMUM_UTC, so a
+# start before NTP has settled would discard readings.
 After=network-online.target time-sync.target
 Wants=network-online.target time-sync.target
+# Deliberately NO dependency on the MQTT broker. The broker is remote and may
+# well be down when this board powers up; the bridge connects asynchronously
+# and buffers into its durable outbox until the broker answers. Verified on
+# hardware: with the broker stopped the service starts and stays active
+# (0 restarts) rather than failing.
 
 [Service]
 Type=simple
 User=terrabyte-edge
 Group=terrabyte-edge
+# The USB serial adapter is owned by root:dialout.
 SupplementaryGroups=dialout
 WorkingDirectory=/opt/terrabyte-edge
 EnvironmentFile=/etc/terrabyte-edge.env
@@ -14,6 +23,9 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/terrabyte-edge/.venv/bin/python -m terrabyte_edge
 Restart=on-failure
 RestartSec=5
+# Creates and owns /var/lib/terrabyte-edge, which holds the SQLite outbox.
+# ProtectSystem=strict makes the rest of the filesystem read-only, so this is
+# what keeps the queue writable — point TB_DATABASE_PATH inside it.
 StateDirectory=terrabyte-edge
 UMask=0077
 NoNewPrivileges=true

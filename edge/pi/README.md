@@ -6,42 +6,61 @@
 
 ## 통신 계약
 
-Arduino는 `115200 baud`에서 한 줄에 JSON 객체 하나와 `\n`을 보냅니다.
-측정값 세 개가 모두 유효할 때만 다음 `telemetry` 메시지를 보냅니다.
+### Arduino → Orange Pi (serial JSON Lines)
+
+`115200 baud`에서 한 줄에 JSON 객체 하나와 `\n`을 보냅니다. 필수 측정값 세 개가
+모두 유효할 때만 `telemetry`를 내보냅니다.
 
 ```json
-{"message_type":"telemetry","protocol_version":1,"node_id":"terrabyte-node-01","sequence":42,"uptime_ms":123456,"air_temperature_c":24.5,"relative_humidity_pct":61.2,"ppfd_umol_m2_s":382.0}
+{"message_type":"telemetry","protocol_version":1,"node_id":"terrabyte-node-001","sequence":42,"uptime_ms":123456,"air_temperature_c":24.5,"relative_humidity_pct":61.2,"ppfd_umol_m2_s":382.0,"illuminance_lux":14000.0,"soil_temperature_c":18.5,"soil_moisture_pct":52.0}
 ```
 
-`hello`와 `sensor_status` 메시지는 상태 확인용으로만 기록하며 백엔드로 보내지
-않습니다. 온도 `-50..80 °C`, 상대습도 `0..100 %`, PPFD `0..5000
-umol·m⁻²·s⁻¹` 범위를 벗어나거나 일부 축이 빠진 메시지는 폐기합니다.
-`sequence`와 `uptime_ms`는 Arduino 재부팅 때 0부터 다시 시작하고 uint32로
-wrap될 수 있으므로 영구 식별자로 사용하지 않습니다. Orange Pi가 각 수신 건에
-별도 UUID를 부여하며 이 UUID와 수신 UTC 시각은 재전송 중에도 바뀌지 않습니다.
+`soil_temperature_c`와 `soil_moisture_pct`는 해당 프로브를 컴파일했을 때만
+나옵니다. **없으면 필드가 통째로 빠지며 0으로 채우지 않습니다** — 관수 판단에
+"확신에 찬 완전 건조"로 도달하면 안 되기 때문입니다.
 
-백엔드 전송은 저장소의 handoff 계약을 따릅니다.
+`hello`와 `sensor_status`는 상태 확인용으로 기록만 하고 전송하지 않습니다.
+범위를 벗어나면 클램프하지 않고 폐기합니다. `sequence`·`uptime_ms`는 재부팅 시
+0부터 다시 시작하고 uint32로 wrap되므로 영구 식별자로 쓰지 않습니다. Orange Pi가
+수신 건마다 UUID를 부여하며, 이 UUID와 수신 UTC 시각은 재전송 중에도 바뀌지
+않습니다.
+
+### Orange Pi → 백엔드 (MQTT, telemetry envelope v2)
+
+운영 전송은 MQTT입니다. 계약 원본은
+[`docs/design/device_model_and_telemetry_contract.md`](../../docs/design/device_model_and_telemetry_contract.md) §6입니다.
 
 ```text
-POST /api/crop-contexts/{contextId}/environment-observations
-Authorization: Bearer <device token>
-X-Device-ID: <gateway id>
-X-Arduino-Node-ID: <provisioned Arduino node id>
-Idempotency-Key: <outbox event UUID>
+tb/v2/{gatewayId}/up/telemetry    게이트웨이 → 서버   QoS 1, retain 안 함
+tb/v2/{gatewayId}/up/status       온라인 상태, LWT     QoS 1, retain
+tb/v2/{gatewayId}/dn/command      서버 → 게이트웨이     QoS 1
 ```
 
-요청 본문은 `capturedAtUtc`, `airTemperatureC`, `relativeHumidityPct`,
-`ppfdUmolM2S`, `inputContract=perfect_calibrated_v1`만 포함합니다. `201`과
-`DUPLICATE_OBSERVATION`인 `409`는 전달 완료로 처리합니다. 네트워크 오류,
-`401`, `403`, `404`, `408`, `425`, `429`, `5xx`는 설정·provisioning 또는
-서버 장애가 복구될 수 있으므로 지수 백오프로 재시도합니다. 이때 오래된
-이벤트가 성공하기 전에는 뒤의 이벤트를 보내지 않아 수집 순서를 보존합니다.
-관측값 자체가 잘못된 나머지 `4xx`는 계속 재시도해 서버를 압박하지 않도록
-SQLite의 `dead` 상태로 격리합니다.
+**인증은 브로커가 담당합니다.** 각 게이트웨이 계정은 자기 `gatewayId` 아래에만
+발행할 수 있어(Mosquitto ACL) 토픽 위조가 불가능하고, 그래서 백엔드는 토픽에서
+뽑은 `gatewayId`를 신뢰합니다. 공용 `X-Device-Key`는 이 구조로 대체되어
+삭제됐습니다.
 
-현재 source of truth가 단건 endpoint만 정의하므로 HTTP 요청도 단건입니다.
-outbox 조회와 HTTP transport가 분리되어 있어 백엔드가 공식 batch endpoint를
-정의하면 저장 형식과 serial 수집부를 바꾸지 않고 transport만 확장할 수 있습니다.
+접속 시 `up/status`에 `{"online": true}`를 retain 발행하고, LWT로
+`{"online": false}`를 등록합니다. 연결이 끊기면 브로커가 대신 발행하므로 서버는
+오프라인 판정을 위해 폴링하지 않습니다. **명령(`dn/command`)은 절대 retain하지
+않습니다** — retain하면 재접속 때마다 오래된 관수 명령이 재실행됩니다.
+
+전달 판정은 PUBACK 기준입니다. MQTT에는 HTTP 4xx에 해당하는 응답이 없어
+"영구히 잘못된 페이로드"와 "일시적 장애"를 구분할 수 없으므로, `dead` 격리는
+브로커에 닿기 전 **로컬 스키마 검증 실패에만** 적용합니다. 나머지는 전부 재시도이며
+outbox가 순서를 보존합니다.
+
+MQTT v5를 씁니다. 3.1.1에서는 브로커가 ACL로 막은 발행에도 PUBACK을 돌려주기
+때문에, 게이트웨이가 자기 네임스페이스 밖으로 발행하도록 잘못 설정되면 성공으로
+보고되고 outbox에서 지워져 데이터가 조용히 사라집니다. v5의 PUBACK reason code로
+이를 감지해 재시도로 처리합니다.
+
+### HTTP 폴백
+
+`TB_TRANSPORT=http`로 바꾸면 같은 envelope을 `POST /api/telemetry`(성공 `202`)로
+보냅니다. 디버그·폴백 경로이며 백엔드에서 기본 비활성입니다
+(`app.telemetry.http-ingest.enabled`).
 
 ## Orange Pi 설치
 
