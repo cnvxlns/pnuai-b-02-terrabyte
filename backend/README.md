@@ -8,17 +8,35 @@
 - PostgreSQL: 사용자, 기기 등 업무 데이터
 - SQLite: 작물별 환경 점수 프로필 및 계산 결과
 - InfluxDB 2.x: 하드웨어 센서 시계열 데이터
+- Mosquitto 2.x: 게이트웨이 ↔ 백엔드 MQTT 브로커 (자세한 내용은 [`infra/mosquitto/README.md`](../infra/mosquitto/README.md) 참고)
 
 ## Docker 로 실행 (권장)
 
-저장소 루트에서 `docker compose up --build` 한 번이면 PostgreSQL·InfluxDB·백엔드·프론트엔드가 함께 뜹니다.
+저장소 루트에서 `docker compose up --build` 한 번이면 PostgreSQL·InfluxDB·Mosquitto·백엔드·프론트엔드가 함께 뜹니다.
 JDK/Gradle 버전은 컨테이너에 고정되어 있고, 원격 디버깅 포트(5005)도 열려 있습니다.
 자세한 내용은 [`docs/docker_dev_environment.md`](../docs/docker_dev_environment.md) 를 참고하세요.
 
 ```bash
 cp .env.example .env
-docker compose up --build        # 전체 스택
+docker compose up --build        # 전체 스택 (PostgreSQL, InfluxDB, Mosquitto, 백엔드, 프론트엔드)
 make test                        # 백엔드 테스트만 실행
+```
+
+컨테이너/서비스 이름은 다음과 같습니다.
+
+| 서비스 | 컨테이너 이름 | 컴포즈 서비스명 |
+| --- | --- | --- |
+| PostgreSQL | `terrabyte-postgres` | `postgres` |
+| InfluxDB | `terrabyte-influxdb` | `influxdb` |
+| Mosquitto | `terrabyte-mosquitto` | `mosquitto` |
+| 백엔드 | `terrabyte-backend` | `backend` |
+| 프론트엔드 | `terrabyte-frontend` | `frontend` |
+
+개별 서비스 로그만 보거나 재시작하려면 서비스명을 지정합니다.
+
+```bash
+docker compose logs -f backend
+docker compose restart mosquitto   # 예: MQTT 인증서를 새로 만든 뒤 브로커만 재시작
 ```
 
 ## 로컬 실행 (호스트에 직접 설치)
@@ -44,6 +62,12 @@ export INFLUX_TOKEN='InfluxDB API 토큰'
 export INFLUX_ORG='terrabyte'
 export INFLUX_BUCKET='telemetry'
 export TELEMETRY_DEVICE_KEY='하드웨어가 X-Device-Key로 보낼 공유 키'
+export MQTT_ENABLED='true'
+# 컨테이너가 아니라 호스트에서 직접 실행하므로 서비스명(mosquitto) 대신 localhost.
+export MQTT_URL='tcp://localhost:1883'
+export MQTT_USERNAME='terrabyte-backend'
+export MQTT_PASSWORD='terrabyte-backend-local'
+export MQTT_TOPIC_PREFIX='tb/v2'
 ```
 
 SQLite 점수 스키마와 마이그레이션은 애플리케이션이 시작될 때 자동으로 적용됩니다.
@@ -78,9 +102,18 @@ DB 파일이 비어 있으면 전체 스키마를 생성하고, 이미 존재하
 면적도 함께 입력합니다. 이미 다른 사용자에게 등록된 기기라는 메시지가 나오면 기존 데모 계정으로 로그인하거나
 아직 사용되지 않은 개발용 코드 `123456`을 사용합니다. `123456`의 하드웨어 ID는 `orangepi-pro-02`입니다.
 
-### 2. InfluxDB 실행 및 로그인
+### 2. InfluxDB·Mosquitto 실행 및 로그인
 
-로컬 InfluxDB 접속 정보는 다음과 같습니다.
+`./gradlew bootRun`으로 백엔드를 호스트에서 직접 띄우더라도, InfluxDB와
+Mosquitto는 저장소 루트의 Compose 스택에서 가져다 쓰는 편이 간단합니다.
+백엔드·프론트엔드 컨테이너는 빼고 인프라 서비스만 띄웁니다.
+
+```bash
+cp .env.example .env   # 이미 만들어 뒀다면 생략
+docker compose up -d postgres influxdb mosquitto
+```
+
+로컬 InfluxDB 접속 정보는 다음과 같습니다 (`.env.example` 기본값 기준).
 
 | 항목 | 값 |
 | --- | --- |
@@ -92,37 +125,18 @@ DB 파일이 비어 있으면 전체 스키마를 생성하고, 이미 존재하
 | API Token | `terrabyte-local-token` |
 | 하드웨어 요청 키 | `terrabyte-local-device-key` |
 
-기존 컨테이너가 있다면 다음 명령으로 실행합니다.
-
-```bash
-docker start terrabyte-influxdb
-```
-
-컨테이너가 아직 없다면 최초 한 번 다음과 같이 생성합니다.
-
-```bash
-docker run -d \
-  --name terrabyte-influxdb \
-  -p 8086:8086 \
-  -v terrabyte-influxdb-data:/var/lib/influxdb2 \
-  -e DOCKER_INFLUXDB_INIT_MODE=setup \
-  -e DOCKER_INFLUXDB_INIT_USERNAME=terrabyte \
-  -e DOCKER_INFLUXDB_INIT_PASSWORD=terrabyte-admin-password \
-  -e DOCKER_INFLUXDB_INIT_ORG=terrabyte \
-  -e DOCKER_INFLUXDB_INIT_BUCKET=telemetry \
-  -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=terrabyte-local-token \
-  influxdb:2.7
-```
-
 컨테이너와 서버 상태를 확인합니다.
 
 ```bash
-docker ps --filter name=terrabyte-influxdb
+docker compose ps influxdb mosquitto
 curl http://localhost:8086/health
 ```
 
 브라우저에서 `http://localhost:8086`을 연 뒤 위 사용자명과 비밀번호로 로그인하면
 Data Explorer에서 `telemetry` 버킷에 저장된 센서 데이터를 확인할 수 있습니다.
+
+Mosquitto는 기본으로 1883(평문) 리스너만 뜨고, TLS(8883)는 인증서를 생성해야
+켜집니다. 인증서 생성 방법과 자격 증명은 [`infra/mosquitto/README.md`](../infra/mosquitto/README.md)를 참고하세요.
 
 ### 3. 백엔드와 프론트엔드 실행
 

@@ -40,6 +40,12 @@ edge/build/
 application-local.yml
 application-local.properties
 
+# === Mosquitto TLS 인증서 (자체 서명, generate-certs.sh 산출물) ===
+# *.key 규칙이 개인키는 이미 잡아내지만, 인증서(.crt)와 서명 요청(.csr)까지
+# 포함해 디렉터리 전체를 무시한다 — 데모용 자체 서명 인증서라도 저장소에
+# 박제해 둘 이유가 없고, 실행할 때마다 generate-certs.sh 로 재생성하면 된다.
+infra/mosquitto/certs/
+
 # === Logs ===
 logs/
 *.log
