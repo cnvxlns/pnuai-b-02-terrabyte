@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=TerraByte 최초 설정 마법사
+Name[en]=TerraByte First-Boot Setup Wizard
+Comment=아두이노·와이파이·신원을 확인하고 등록 번호를 안내합니다
+# XDG autostart has no conditional field, so the "first boot only" decision is
+# made by the shell guard below instead of by enabling/disabling this file.
+# Deleting the entry after setup would work too, but then a re-run would need
+# someone to remember where the file came from; the marker file is the single
+# source of truth and `rm` on it is the documented way to start over.
+#
+# The env file is sourced with `set -a` because /etc/terrabyte-edge.env stores
+# bare KEY=value lines (systemd EnvironmentFile syntax) that would otherwise stay
+# shell-local and never reach python. Sourcing usually FAILS here and that is
+# fine: the file is root-owned 0640 because it holds the MQTT password, so the
+# desktop user cannot read it. The wizard then takes its identity from the
+# status snapshot the bridge publishes (0644), which carries the same gateway id
+# and claim code loaded from that very env file.
+Exec=sh -c "[ -e /var/lib/terrabyte-edge/setup-complete ] && exit 0; set -a; [ -r /etc/terrabyte-edge.env ] && . /etc/terrabyte-edge.env; set +a; exec /opt/terrabyte-edge/.venv/bin/python -m terrabyte_edge wizard"
+Terminal=false
+X-GNOME-Autostart-enabled=true
+# Starts ahead of the dashboard (delay 5) on purpose. Both are full-screen Tk
+# windows and whichever maps last takes focus; the wizard must be the one the
+# user sees at a first boot, and by the time it exits the dashboard is up.
+X-GNOME-Autostart-Delay=2

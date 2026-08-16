@@ -8,7 +8,10 @@ Comment=화분 상태와 등록 번호를 전체화면으로 표시합니다
 # the Linux console font format caps at 512 glyphs so Hangul cannot render
 # there, and the vendor image boots to graphical.target with lightdm already
 # owning tty1 — taking it would mean fighting the display manager.
-Exec=/opt/terrabyte-edge/.venv/bin/python -m terrabyte_edge dashboard
+# The marker guard is the inverse of the wizard's. Without it both would start
+# on a first boot and the dashboard, mapping last, would cover the wizard the
+# user is supposed to be working through.
+Exec=sh -c "[ -e /var/lib/terrabyte-edge/setup-complete ] || exit 0; exec /opt/terrabyte-edge/.venv/bin/python -m terrabyte_edge dashboard"
 # Read-only consumer of /run/terrabyte-edge/status.json. It holds no serial
 # port and opens no socket, so a crash here cannot affect telemetry.
 Terminal=false
