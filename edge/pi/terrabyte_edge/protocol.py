@@ -15,7 +15,31 @@ class ProtocolError(ValueError):
 
 
 class NonTelemetryMessage(ProtocolError):
-    """Raised for valid protocol messages that carry no measurements."""
+    """Raised for valid protocol messages that carry no measurements.
+
+    ``node_id`` is carried alongside the type because the ``hello`` frame is
+    how a port learns which Arduino is on the other end, before that Arduino
+    has produced its first reading. Discarding it would leave a freshly
+    plugged-in node invisible on screen until its first sample arrives.
+    """
+
+    def __init__(self, message_type: str, node_id: str | None = None) -> None:
+        super().__init__(message_type)
+        self.message_type = message_type
+        self.node_id = node_id
+
+
+class UnknownNodeError(ProtocolError):
+    """Raised when a line carries a node_id outside the configured allowlist.
+
+    Distinct from a plain ProtocolError so the service can count it separately
+    and name the offending id on screen: an Arduino flashed with the wrong
+    TB_NODE_ID looks identical to a dead port in the logs otherwise.
+    """
+
+    def __init__(self, node_id: str) -> None:
+        super().__init__(f"node_id is not in the configured allowlist: {node_id}")
+        self.node_id = node_id
 
 
 @dataclass(frozen=True)
@@ -42,6 +66,31 @@ class Event:
     def has_soil_reading(self) -> bool:
         return self.soil_temperature_c is not None or self.soil_moisture_pct is not None
 
+    def measurements(self) -> dict[str, float]:
+        """The metric map, keyed by backend ``MeasurementMetric`` field names.
+
+        Soil metrics are omitted entirely rather than sent as null or zero when
+        the probes are absent: a 0.0 would reach the irrigation path as a
+        confident "bone dry", which is the one reading that must never be
+        fabricated.
+
+        Both the wire envelope and the on-screen status read this, so the
+        display can never disagree with what was actually published.
+        """
+
+        values: dict[str, float] = {
+            "air_temperature_c": self.air_temperature_c,
+            "air_humidity_pct": self.relative_humidity_pct,
+            "plant_light_ppfd_umol_m2_s": self.ppfd_umol_m2_s,
+        }
+        if self.soil_temperature_c is not None:
+            values["soil_temperature_c"] = self.soil_temperature_c
+        if self.soil_moisture_pct is not None:
+            values["soil_moisture_pct"] = self.soil_moisture_pct
+        if self.soil_moisture_raw_adc is not None:
+            values["soil_moisture_raw_adc"] = self.soil_moisture_raw_adc
+        return values
+
     def envelope_v2(self, *, gateway_id: str) -> dict[str, object]:
         """Build a telemetry.sample envelope v2 body (one node per envelope).
 
@@ -52,23 +101,10 @@ class Event:
         SQLite outbox schema (an explicit design constraint — see
         docs/design/device_model_and_telemetry_contract.md §6.1).
 
-        Field names below must match the backend ``MeasurementMetric`` enum
-        literally. Soil metrics are omitted entirely rather than sent as null
-        or zero when the probes are absent: a 0.0 would reach the irrigation
-        path as a confident "bone dry", which is the one reading that must
-        never be fabricated.
+        Field names come from :meth:`measurements`, which must match the
+        backend ``MeasurementMetric`` enum literally.
         """
-        measurements: dict[str, object] = {
-            "air_temperature_c": self.air_temperature_c,
-            "air_humidity_pct": self.relative_humidity_pct,
-            "plant_light_ppfd_umol_m2_s": self.ppfd_umol_m2_s,
-        }
-        if self.soil_temperature_c is not None:
-            measurements["soil_temperature_c"] = self.soil_temperature_c
-        if self.soil_moisture_pct is not None:
-            measurements["soil_moisture_pct"] = self.soil_moisture_pct
-        if self.soil_moisture_raw_adc is not None:
-            measurements["soil_moisture_raw_adc"] = self.soil_moisture_raw_adc
+        measurements = self.measurements()
 
         return {
             "schema_version": 2,
@@ -163,7 +199,7 @@ def parse_line(
     line: bytes,
     *,
     context_id: str,
-    expected_node_id: str,
+    allowed_node_ids: frozenset[str],
     clock_minimum_utc: datetime,
     clock: Callable[[], datetime] | None = None,
     event_id_factory: Callable[[], uuid.UUID] = uuid.uuid4,
@@ -183,7 +219,11 @@ def parse_line(
 
     message_type = message.get("message_type")
     if message_type in {"hello", "sensor_status", "configuration_error"}:
-        raise NonTelemetryMessage(str(message_type))
+        announced = message.get("node_id")
+        raise NonTelemetryMessage(
+            str(message_type),
+            announced if isinstance(announced, str) and announced else None,
+        )
     if message_type != "telemetry":
         raise ProtocolError("message_type must be telemetry")
     if message.get("protocol_version") != 1:
@@ -197,8 +237,11 @@ def parse_line(
         for character in node_id
     ):
         raise ProtocolError("node_id contains unsupported characters")
-    if node_id != expected_node_id:
-        raise ProtocolError("node_id does not match the provisioned Arduino")
+    # The allowlist stays a hard reject rather than widening to "any node".
+    # It is the only thing stopping an Arduino cabled into the wrong gateway
+    # from injecting readings against someone else's pot.
+    if node_id not in allowed_node_ids:
+        raise UnknownNodeError(node_id)
     if not context_id:
         raise ProtocolError("context_id must not be empty")
 

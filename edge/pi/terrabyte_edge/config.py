@@ -17,6 +17,13 @@ class ConfigError(ValueError):
 
 NODE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
+CLAIM_CODE = re.compile(r"^[0-9]{6}$")
+
+# One gateway fronts at most this many Arduinos. The ceiling is not a hardware
+# limit; it keeps a typo in a comma-separated list from silently spawning
+# hundreds of reader threads on a board with a few hundred MB of RAM.
+MAX_NODES = 4
+
 
 def _required(env: Mapping[str, str], name: str) -> str:
     value = env.get(name, "").strip()
@@ -71,6 +78,38 @@ def _utc_timestamp(env: Mapping[str, str], name: str, default: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _csv_list(
+    env: Mapping[str, str], plural_name: str, singular_name: str
+) -> list[str]:
+    """Read a comma-separated setting, falling back to its singular form.
+
+    Existing deployments have the singular variable in
+    ``/etc/terrabyte-edge.env``; they must keep working untouched after an
+    upgrade. The plural wins when both are present, so a half-finished edit
+    cannot leave the plural list silently ignored.
+    """
+
+    raw = env.get(plural_name, "").strip()
+    if not raw:
+        raw = env.get(singular_name, "").strip()
+    if not raw:
+        raise ConfigError(f"{plural_name} or {singular_name} must be set")
+
+    items = [item.strip() for item in raw.split(",")]
+    items = [item for item in items if item]
+    if not items:
+        raise ConfigError(f"{plural_name} must not be empty")
+
+    duplicates = {item for item in items if items.count(item) > 1}
+    if duplicates:
+        raise ConfigError(
+            f"{plural_name} contains duplicates: {', '.join(sorted(duplicates))}"
+        )
+    if len(items) > MAX_NODES:
+        raise ConfigError(f"{plural_name} accepts at most {MAX_NODES} entries")
+    return items
+
+
 def _load_token(env: Mapping[str, str], *, required: bool) -> str:
     direct = env.get("TB_DEVICE_TOKEN", "").strip()
     token_file = env.get("TB_DEVICE_TOKEN_FILE", "").strip()
@@ -101,7 +140,7 @@ def _load_token(env: Mapping[str, str], *, required: bool) -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    serial_port: str
+    serial_ports: tuple[str, ...]
     serial_baud: int
     serial_timeout_seconds: float
     serial_reconnect_seconds: float
@@ -111,7 +150,10 @@ class Settings:
     backend_base_url: str
     crop_context_id: str
     device_id: str
-    expected_node_id: str
+    expected_node_ids: frozenset[str]
+    claim_code: str
+    status_snapshot_path: Path
+    status_snapshot_seconds: float
     device_token: str
     clock_minimum_utc: datetime
     http_timeout_seconds: float
@@ -199,12 +241,32 @@ class Settings:
         if retry_max < retry_base:
             raise ConfigError("TB_RETRY_MAX_SECONDS must not be below retry base")
 
-        expected_node_id = _required(values, "TB_EXPECTED_NODE_ID")
-        if NODE_ID.fullmatch(expected_node_id) is None:
-            raise ConfigError("TB_EXPECTED_NODE_ID contains unsupported characters")
+        expected_node_ids = _csv_list(
+            values, "TB_EXPECTED_NODE_IDS", "TB_EXPECTED_NODE_ID"
+        )
+        for node_id in expected_node_ids:
+            if NODE_ID.fullmatch(node_id) is None:
+                raise ConfigError(
+                    f"TB_EXPECTED_NODE_IDS entry contains unsupported characters: {node_id}"
+                )
+
+        serial_ports = _csv_list(values, "TB_SERIAL_PORTS", "TB_SERIAL_PORT")
+        # Ports and nodes are matched at runtime by the node_id the firmware
+        # reports, not by position, so the two lists need not be the same
+        # length. A gateway may be cabled for four pots and only have two
+        # Arduinos powered on.
+        if len(serial_ports) > len(expected_node_ids):
+            raise ConfigError(
+                "TB_SERIAL_PORTS has more entries than TB_EXPECTED_NODE_IDS; "
+                "every port must be able to map to an allowed node"
+            )
+
+        claim_code = values.get("TB_CLAIM_CODE", "").strip()
+        if claim_code and CLAIM_CODE.fullmatch(claim_code) is None:
+            raise ConfigError("TB_CLAIM_CODE must be exactly six digits")
 
         return cls(
-            serial_port=_required(values, "TB_SERIAL_PORT"),
+            serial_ports=tuple(serial_ports),
             serial_baud=_integer(values, "TB_SERIAL_BAUD", 115200),
             serial_timeout_seconds=_number(
                 values, "TB_SERIAL_TIMEOUT_SECONDS", 1.0, minimum=0.1
@@ -224,7 +286,19 @@ class Settings:
             backend_base_url=base_url,
             crop_context_id=_required(values, "TB_CROP_CONTEXT_ID"),
             device_id=_required(values, "TB_DEVICE_ID"),
-            expected_node_id=expected_node_id,
+            expected_node_ids=frozenset(expected_node_ids),
+            claim_code=claim_code,
+            # /run, not /var/lib: systemd removes RuntimeDirectory when the
+            # service stops, so a stale snapshot can never outlive the bridge
+            # and mislead the display into showing dead readings as live.
+            status_snapshot_path=Path(
+                values.get(
+                    "TB_STATUS_SNAPSHOT_PATH", "/run/terrabyte-edge/status.json"
+                )
+            ),
+            status_snapshot_seconds=_number(
+                values, "TB_STATUS_SNAPSHOT_SECONDS", 1.0, minimum=0.2
+            ),
             device_token=device_token,
             clock_minimum_utc=_utc_timestamp(
                 values, "TB_CLOCK_MINIMUM_UTC", "2025-01-01T00:00:00Z"

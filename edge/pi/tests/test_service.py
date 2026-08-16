@@ -70,12 +70,15 @@ class ServiceTests(unittest.TestCase):
         settings = SimpleNamespace(
             upload_batch_size=20,
             http_timeout_seconds=1.0,
+            device_id="orangepi-test",
+            claim_code="483920",
+            transport="mqtt",
         )
         service = BridgeService(
             settings,
             outbox=outbox,
             publisher=publisher,
-            serial_reader=object(),
+            serial_readers=[],
         )
 
         self.assertEqual(service._upload_once(), 1)
@@ -89,12 +92,15 @@ class ServiceTests(unittest.TestCase):
         settings = SimpleNamespace(
             upload_batch_size=20,
             http_timeout_seconds=1.0,
+            device_id="orangepi-test",
+            claim_code="483920",
+            transport="mqtt",
         )
         service = BridgeService(
             settings,
             outbox=outbox,
             publisher=publisher,
-            serial_reader=object(),
+            serial_readers=[],
         )
 
         service.join()

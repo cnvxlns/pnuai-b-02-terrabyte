@@ -27,6 +27,12 @@ RestartSec=5
 # ProtectSystem=strict makes the rest of the filesystem read-only, so this is
 # what keeps the queue writable — point TB_DATABASE_PATH inside it.
 StateDirectory=terrabyte-edge
+# Creates /run/terrabyte-edge for the live status snapshot the display reads.
+# systemd removes it when the unit stops, so the display can never present a
+# stale snapshot as current. 0755 so the unprivileged display process can read
+# it; the snapshot deliberately carries no credentials.
+RuntimeDirectory=terrabyte-edge
+RuntimeDirectoryMode=0755
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

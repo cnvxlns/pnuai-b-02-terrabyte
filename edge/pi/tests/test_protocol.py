@@ -33,7 +33,7 @@ def line(message: dict[str, object]) -> bytes:
 def parse(raw: bytes, **overrides):
     options = {
         "context_id": "ctx-1",
-        "expected_node_id": "terrabyte-node-01",
+        "allowed_node_ids": frozenset({"terrabyte-node-01"}),
         "clock_minimum_utc": MINIMUM_CLOCK,
     }
     options.update(overrides)
@@ -94,12 +94,12 @@ class ProtocolTests(unittest.TestCase):
     def test_node_id_uses_same_safe_character_set_as_firmware(self) -> None:
         parse(
             line(dict(VALID, node_id="node_A-1.2:usb")),
-            expected_node_id="node_A-1.2:usb",
+            allowed_node_ids=frozenset({"node_A-1.2:usb"}),
         )
         with self.assertRaisesRegex(ProtocolError, "node_id"):
             parse(
                 line(dict(VALID, node_id="node with spaces")),
-                expected_node_id="node with spaces",
+                allowed_node_ids=frozenset({"node with spaces"}),
             )
 
     def test_all_three_axes_are_required(self) -> None:
@@ -140,7 +140,7 @@ class ProtocolTests(unittest.TestCase):
                     parse(raw)
 
     def test_wrong_node_and_unsynchronized_clock_are_rejected(self) -> None:
-        with self.assertRaisesRegex(ProtocolError, "provisioned Arduino"):
+        with self.assertRaisesRegex(ProtocolError, "allowlist"):
             parse(line(dict(VALID, node_id="another-node")))
         with self.assertRaisesRegex(ProtocolError, "system clock"):
             parse(
