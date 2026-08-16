@@ -48,7 +48,7 @@ public record LatestMeasurementsResponse(
             long soilMoistureRawAdc,
             double airTemperatureC,
             double airHumidityPct,
-            double plantLightPpfdUmolM2S) {
+            Double plantLightPpfdUmolM2S) {
     }
 
     public record Quality(

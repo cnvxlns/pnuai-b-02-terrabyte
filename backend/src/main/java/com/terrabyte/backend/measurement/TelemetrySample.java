@@ -19,7 +19,7 @@ public record TelemetrySample(
         long soilMoistureRawAdc,
         double airTemperatureC,
         double airHumidityPct,
-        double plantLightPpfdUmolM2S,
+        Double plantLightPpfdUmolM2S,
         boolean soilSensorValid,
         boolean airSensorValid,
         boolean lightSensorValid) {
@@ -66,7 +66,7 @@ public record TelemetrySample(
             long soilMoistureRawAdc,
             double airTemperatureC,
             double airHumidityPct,
-            double plantLightPpfdUmolM2S,
+            Double plantLightPpfdUmolM2S,
             boolean soilSensorValid,
             boolean airSensorValid,
             boolean lightSensorValid) {

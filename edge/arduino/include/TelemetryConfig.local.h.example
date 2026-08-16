@@ -22,7 +22,7 @@
 // #define TB_GY30_PPFD_CALIBRATION_ENABLED 1
 // #define TB_PPFD_PER_LUX 0.01f
 // #define TB_PPFD_OFFSET 0.0f
-// #define TB_PPFD_CALIBRATED_MIN_LUX 100.0f
+// #define TB_PPFD_CALIBRATED_MIN_LUX 0.0f
 // #define TB_PPFD_CALIBRATED_MAX_LUX 50000.0f
 
 // Optional waterproof DS18B20 soil-temperature probe. Connect its DATA wire

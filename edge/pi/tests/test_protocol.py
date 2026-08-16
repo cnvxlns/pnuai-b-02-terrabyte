@@ -81,11 +81,17 @@ class ProtocolTests(unittest.TestCase):
                 expected_node_id="node with spaces",
             )
 
-    def test_all_three_axes_are_required(self) -> None:
+    def test_ppfd_field_is_required(self) -> None:
         invalid = dict(VALID)
         del invalid["ppfd_umol_m2_s"]
         with self.assertRaisesRegex(ProtocolError, "ppfd_umol_m2_s"):
             parse(line(invalid))
+
+    def test_explicit_null_ppfd_is_preserved_for_backend(self) -> None:
+        event = parse(line(dict(VALID, ppfd_umol_m2_s=None)))
+
+        self.assertIsNone(event.ppfd_umol_m2_s)
+        self.assertIsNone(event.backend_body()["ppfdUmolM2S"])
 
     def test_nan_and_out_of_range_values_are_rejected(self) -> None:
         for field, value in (

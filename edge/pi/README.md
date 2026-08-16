@@ -7,15 +7,17 @@
 ## 통신 계약
 
 Arduino는 `115200 baud`에서 한 줄에 JSON 객체 하나와 `\n`을 보냅니다.
-측정값 세 개가 모두 유효할 때만 다음 `telemetry` 메시지를 보냅니다.
+대기 온도와 상대습도가 유효하면 다음 `telemetry` 메시지를 보냅니다. PPFD를
+읽을 수 없을 때는 값을 꾸미지 않고 명시적 `null`로 보냅니다.
 
 ```json
-{"message_type":"telemetry","protocol_version":1,"node_id":"terrabyte-node-01","sequence":42,"uptime_ms":123456,"air_temperature_c":24.5,"relative_humidity_pct":61.2,"ppfd_umol_m2_s":382.0}
+{"message_type":"telemetry","protocol_version":1,"node_id":"terrabyte-node-01","sequence":42,"uptime_ms":123456,"air_temperature_c":24.5,"relative_humidity_pct":61.2,"ppfd_umol_m2_s":null}
 ```
 
 `hello`와 `sensor_status` 메시지는 상태 확인용으로만 기록하며 백엔드로 보내지
-않습니다. 온도 `-50..80 °C`, 상대습도 `0..100 %`, PPFD `0..5000
-umol·m⁻²·s⁻¹` 범위를 벗어나거나 일부 축이 빠진 메시지는 폐기합니다.
+않습니다. 온도 `-50..80 °C`, 상대습도 `0..100 %`를 검증하고 PPFD는
+명시적 `null` 또는 `0..5000 umol·m⁻²·s⁻¹` 숫자를 허용합니다. PPFD 키
+자체가 누락된 메시지는 계약 오류로 폐기합니다.
 `sequence`와 `uptime_ms`는 Arduino 재부팅 때 0부터 다시 시작하고 uint32로
 wrap될 수 있으므로 영구 식별자로 사용하지 않습니다. Orange Pi가 각 수신 건에
 별도 UUID를 부여하며 이 UUID와 수신 UTC 시각은 재전송 중에도 바뀌지 않습니다.

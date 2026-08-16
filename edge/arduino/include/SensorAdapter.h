@@ -12,10 +12,10 @@ enum SensorValidity : uint8_t {
 };
 
 constexpr uint8_t kCoreTelemetryFieldsValid =
-    kAirTemperatureValid | kRelativeHumidityValid | kPpfdValid;
+    kAirTemperatureValid | kRelativeHumidityValid;
 constexpr uint8_t kAllSensorFieldsValid =
-    kCoreTelemetryFieldsValid | kSoilTemperatureValid | kSoilMoistureValid |
-    kIlluminanceValid;
+    kCoreTelemetryFieldsValid | kPpfdValid | kSoilTemperatureValid |
+    kSoilMoistureValid | kIlluminanceValid;
 
 struct SensorSample {
   float airTemperatureC = NAN;

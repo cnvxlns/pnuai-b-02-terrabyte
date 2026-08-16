@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from io import BytesIO
 import json
 import unittest
@@ -7,7 +9,7 @@ from terrabyte_edge.backend import BackendClient, Delivery
 from terrabyte_edge.protocol import Event
 
 
-def event() -> Event:
+def event(ppfd: float | None = 300.0) -> Event:
     return Event(
         event_id="event-123",
         context_id="ctx/id",
@@ -17,7 +19,7 @@ def event() -> Event:
         uptime_ms=100,
         air_temperature_c=20.0,
         relative_humidity_pct=50.0,
-        ppfd_umol_m2_s=300.0,
+        ppfd_umol_m2_s=ppfd,
     )
 
 
@@ -96,6 +98,19 @@ class BackendTests(unittest.TestCase):
 
         result = self.client(transport).send(event())
         self.assertIs(result.outcome, Delivery.DELIVERED)
+
+    def test_null_ppfd_is_sent_explicitly(self) -> None:
+        captured = {}
+
+        def transport(request, _timeout):
+            captured["body"] = json.loads(request.data)
+            return FakeResponse(201)
+
+        result = self.client(transport).send(event(ppfd=None))
+
+        self.assertIs(result.outcome, Delivery.DELIVERED)
+        self.assertIn("ppfdUmolM2S", captured["body"])
+        self.assertIsNone(captured["body"]["ppfdUmolM2S"])
 
     def test_retryable_status_honors_retry_after(self) -> None:
         error = HTTPError(

@@ -228,14 +228,14 @@ SQLite outbox는 손대지 않는다.
       "measurements": {
         "air_temperature_c": 27.1,
         "air_humidity_pct": 58.0,
-        "plant_light_ppfd_umol_m2_s": 230.5,
+        "plant_light_ppfd_umol_m2_s": null,
         "soil_temperature_c": 21.4,
         "soil_moisture_pct": 31.2,
         "soil_moisture_raw_adc": 1847
       },
       "quality": {
         "air_sensor_valid": true,
-        "light_sensor_valid": true,
+        "light_sensor_valid": false,
         "soil_sensor_valid": true
       }
     }
@@ -250,13 +250,18 @@ SQLite outbox는 손대지 않는다.
 |---|---|---|
 | `air_temperature_c` | ✅ | −50 ~ 80 |
 | `air_humidity_pct` | ✅ | 0 ~ 100 |
-| `plant_light_ppfd_umol_m2_s` | ✅ | 0 ~ 5000 |
+| `plant_light_ppfd_umol_m2_s` | 선택(nullable) | 값이 있으면 0 ~ 5000 |
 | `soil_temperature_c` | 선택 | 신규 metric. −20 ~ 80 |
 | `soil_moisture_pct` | 선택 | 0 ~ 100 |
 | `soil_moisture_raw_adc` | 선택 | **기존 필수에서 선택으로 완화** |
 
 `soil_moisture_raw_adc`를 필수에서 뺀 이유는, Arduino가 raw ADC를 emit하지 않는데 Spring이 필수로
 요구해 계약이 깨져 있었기 때문이다. 보정 검증용으로 유용하므로 필드는 유지하되 선택으로 둔다.
+
+광량 센서가 없거나 고장 난 경우 `plant_light_ppfd_umol_m2_s`는 생략하지 않고 명시적 `null`,
+`light_sensor_valid`는 `false`로 보낸다. 이 샘플의 다른 유효 측정값은 정상 저장하지만 환경 적합도는
+계산하지 않는다. PPFD 숫자와 `light_sensor_valid=false`, 또는 PPFD `null`과
+`light_sensor_valid=true`처럼 서로 모순된 조합은 수집 단계에서 거부한다.
 
 `event_id`는 Orange Pi outbox의 UUID를 그대로 쓴다. 백엔드는 이 값으로 중복 수집을 차단한다.
 

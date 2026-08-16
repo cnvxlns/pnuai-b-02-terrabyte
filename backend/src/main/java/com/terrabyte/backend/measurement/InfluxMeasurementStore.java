@@ -41,11 +41,13 @@ public class InfluxMeasurementStore implements MeasurementStore {
                 .addField("soil_moisture_raw_adc", sample.soilMoistureRawAdc())
                 .addField("air_temperature_c", sample.airTemperatureC())
                 .addField("air_humidity_pct", sample.airHumidityPct())
-                .addField("plant_light_ppfd_umol_m2_s", sample.plantLightPpfdUmolM2S())
                 .addField("soil_sensor_valid", sample.soilSensorValid())
                 .addField("air_sensor_valid", sample.airSensorValid())
                 .addField("light_sensor_valid", sample.lightSensorValid())
                 .time(sample.observedAt(), WritePrecision.NS);
+        if (sample.plantLightPpfdUmolM2S() != null) {
+            point.addField("plant_light_ppfd_umol_m2_s", sample.plantLightPpfdUmolM2S());
+        }
         client.getWriteApiBlocking().writePoint(point);
     }
 
@@ -116,7 +118,7 @@ public class InfluxMeasurementStore implements MeasurementStore {
                 number(values.get("soil_moisture_raw_adc")).longValue(),
                 number(values.get("air_temperature_c")).doubleValue(),
                 number(values.get("air_humidity_pct")).doubleValue(),
-                number(values.get("plant_light_ppfd_umol_m2_s")).doubleValue(),
+                nullableNumber(values.get("plant_light_ppfd_umol_m2_s")),
                 Boolean.TRUE.equals(values.get("soil_sensor_valid")),
                 Boolean.TRUE.equals(values.get("air_sensor_valid")),
                 Boolean.TRUE.equals(values.get("light_sensor_valid")));
@@ -127,6 +129,10 @@ public class InfluxMeasurementStore implements MeasurementStore {
             return number;
         }
         throw new IllegalStateException("InfluxDB numeric field is missing or invalid");
+    }
+
+    private Double nullableNumber(Object value) {
+        return value == null ? null : number(value).doubleValue();
     }
 
     private String string(Map<String, Object> values, String key) {

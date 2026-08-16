@@ -162,7 +162,7 @@ void emitSensorStatus(const uint32_t sequence, const uint32_t uptimeMs,
 }
 
 void emitTelemetry(const uint32_t sequence, const uint32_t uptimeMs,
-                   const SensorSample& sample) {
+                   const uint8_t validity, const SensorSample& sample) {
   printEnvelopeStart(F("telemetry"));
   Serial.print(F(",\"sequence\":"));
   Serial.print(sequence);
@@ -173,7 +173,11 @@ void emitTelemetry(const uint32_t sequence, const uint32_t uptimeMs,
   Serial.print(F(",\"relative_humidity_pct\":"));
   Serial.print(sample.relativeHumidityPct, 2);
   Serial.print(F(",\"ppfd_umol_m2_s\":"));
-  Serial.print(sample.ppfdUmolM2S, 2);
+  if (validity & kPpfdValid) {
+    Serial.print(sample.ppfdUmolM2S, 2);
+  } else {
+    Serial.print(F("null"));
+  }
 #if TB_GY30_ENABLED
   Serial.print(F(",\"illuminance_lux\":"));
   Serial.print(sample.illuminanceLux, 2);
@@ -205,7 +209,7 @@ void sampleAndPublish(const uint32_t uptimeMs) {
     return;
   }
 
-  emitTelemetry(sequence, uptimeMs, sample);
+  emitTelemetry(sequence, uptimeMs, validity, sample);
 }
 
 }  // namespace

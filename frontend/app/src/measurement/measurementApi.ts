@@ -10,7 +10,7 @@ export type LatestMeasurements = {
     soilMoistureRawAdc: number;
     airTemperatureC: number;
     airHumidityPct: number;
-    plantLightPpfdUmolM2S: number;
+    plantLightPpfdUmolM2S: number | null;
   };
   quality: {
     soilSensorValid: boolean;

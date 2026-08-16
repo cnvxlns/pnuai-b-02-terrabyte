@@ -28,7 +28,7 @@ class Event:
     uptime_ms: int
     air_temperature_c: float
     relative_humidity_pct: float
-    ppfd_umol_m2_s: float
+    ppfd_umol_m2_s: float | None
 
     def backend_body(self) -> dict[str, object]:
         return {
@@ -78,6 +78,16 @@ def _reading(
     if not math.isfinite(reading) or not minimum <= reading <= maximum:
         raise ProtocolError(f"{name} is outside canonical range")
     return reading
+
+
+def _nullable_reading(
+    message: dict[str, Any], name: str, minimum: float, maximum: float
+) -> float | None:
+    if name not in message:
+        raise ProtocolError(f"{name} is required")
+    if message[name] is None:
+        return None
+    return _reading(message, name, minimum, maximum)
 
 
 def parse_line(
@@ -141,5 +151,7 @@ def parse_line(
         relative_humidity_pct=_reading(
             message, "relative_humidity_pct", 0.0, 100.0
         ),
-        ppfd_umol_m2_s=_reading(message, "ppfd_umol_m2_s", 0.0, 5000.0),
+        ppfd_umol_m2_s=_nullable_reading(
+            message, "ppfd_umol_m2_s", 0.0, 5000.0
+        ),
     )

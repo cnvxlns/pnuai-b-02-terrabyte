@@ -3,8 +3,10 @@ package com.terrabyte.backend.measurement;
 import java.time.Instant;
 
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Max;
@@ -26,6 +28,16 @@ public record TelemetrySampleRequest(
         @NotNull @Valid Measurements measurements,
         @NotNull @Valid Quality quality) {
 
+    @JsonIgnore
+    @AssertTrue(message = "plant light PPFD and light sensor validity must be consistent")
+    public boolean isLightMeasurementConsistent() {
+        if (measurements == null || quality == null || quality.lightSensorValid() == null) {
+            return true;
+        }
+        return (measurements.plantLightPpfdUmolM2S() != null)
+                == quality.lightSensorValid();
+    }
+
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record Context(
             @NotBlank @Size(max = 100) String siteId,
@@ -41,7 +53,7 @@ public record TelemetrySampleRequest(
             @NotNull @PositiveOrZero Long soilMoistureRawAdc,
             @NotNull @DecimalMin("-50.0") @DecimalMax("100.0") Double airTemperatureC,
             @NotNull @DecimalMin("0.0") @DecimalMax("100.0") Double airHumidityPct,
-            @NotNull @DecimalMin("0.0") @DecimalMax("5000.0") Double plantLightPpfdUmolM2S) {
+            @DecimalMin("0.0") @DecimalMax("5000.0") Double plantLightPpfdUmolM2S) {
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)

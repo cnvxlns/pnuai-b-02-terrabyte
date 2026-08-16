@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -24,6 +25,7 @@ import com.terrabyte.backend.score.CropScoreProfile;
 import com.terrabyte.backend.score.CropScoreProfileRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -92,6 +94,41 @@ class MeasurementApiIntegrationTests {
                 String.class,
                 HARDWARE_ID);
         assertThat(statusValue).isEqualTo("ONLINE");
+    }
+
+    @Test
+    void acceptsTelemetryWithoutPpfdWhenLightSensorIsInvalid() throws Exception {
+        Instant observedAt = Instant.now().minusSeconds(5);
+
+        mockMvc.perform(post("/api/telemetry")
+                        .header("X-Device-Key", DEVICE_KEY)
+                        .contentType(APPLICATION_JSON)
+                        .content(telemetryBody(HARDWARE_ID, observedAt, 1043, 58.0, null, false)))
+                .andExpect(status().isAccepted());
+
+        ArgumentCaptor<TelemetrySample> captor = ArgumentCaptor.forClass(TelemetrySample.class);
+        verify(measurementStore).write(captor.capture());
+        assertThat(captor.getValue().plantLightPpfdUmolM2S()).isNull();
+        assertThat(captor.getValue().lightSensorValid()).isFalse();
+    }
+
+    @Test
+    void rejectsInconsistentPpfdAndLightSensorValidity() throws Exception {
+        Instant observedAt = Instant.now().minusSeconds(5);
+
+        mockMvc.perform(post("/api/telemetry")
+                        .header("X-Device-Key", DEVICE_KEY)
+                        .contentType(APPLICATION_JSON)
+                        .content(telemetryBody(HARDWARE_ID, observedAt, 1043, 58.0, null, true)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+
+        mockMvc.perform(post("/api/telemetry")
+                        .header("X-Device-Key", DEVICE_KEY)
+                        .contentType(APPLICATION_JSON)
+                        .content(telemetryBody(HARDWARE_ID, observedAt, 1044, 58.0, 230.5, false)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
     }
 
     @Test
@@ -166,6 +203,20 @@ class MeasurementApiIntegrationTests {
                 .andExpect(jsonPath("$.factors[0].key").value("temperature"))
                 .andExpect(jsonPath("$.factors[2].key").value("plantLight"))
                 .andExpect(jsonPath("$.factors[2].score").value(88.7));
+
+        TelemetrySample sampleWithoutPpfd = sampleWithoutPpfd(Instant.now());
+        when(measurementStore.findLatest(potId)).thenReturn(java.util.Optional.of(sampleWithoutPpfd));
+
+        mockMvc.perform(get("/api/devices/{deviceId}/measurements/latest", deviceId)
+                        .header("Authorization", bearer(token)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.measurements.plantLightPpfdUmolM2S").value(nullValue()))
+                .andExpect(jsonPath("$.quality.lightSensorValid").value(false));
+
+        mockMvc.perform(get("/api/devices/{deviceId}/score", deviceId)
+                        .header("Authorization", bearer(token)))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("SCORE_INPUT_INCOMPLETE"));
     }
 
     @Test
@@ -186,6 +237,16 @@ class MeasurementApiIntegrationTests {
             Instant observedAt,
             long sequence,
             double humidity) throws Exception {
+        return telemetryBody(hardwareId, observedAt, sequence, humidity, 230.5, true);
+    }
+
+    private String telemetryBody(
+            String hardwareId,
+            Instant observedAt,
+            long sequence,
+            double humidity,
+            Double ppfd,
+            boolean lightSensorValid) throws Exception {
         TelemetrySampleRequest request = new TelemetrySampleRequest(
                 1,
                 "telemetry.sample",
@@ -194,8 +255,8 @@ class MeasurementApiIntegrationTests {
                 sequence,
                 new TelemetrySampleRequest.Context(
                         "pnu-lab", "pot-01", "loam", "basil", "soil-v2"),
-                new TelemetrySampleRequest.Measurements(31.2, 1847L, 27.1, humidity, 230.5),
-                new TelemetrySampleRequest.Quality(true, true, true));
+                new TelemetrySampleRequest.Measurements(31.2, 1847L, 27.1, humidity, ppfd),
+                new TelemetrySampleRequest.Quality(true, true, lightSensorValid));
         return objectMapper.writeValueAsString(request);
     }
 
@@ -217,6 +278,26 @@ class MeasurementApiIntegrationTests {
                 true,
                 true,
                 true);
+    }
+
+    private TelemetrySample sampleWithoutPpfd(Instant observedAt) {
+        return new TelemetrySample(
+                HARDWARE_ID,
+                observedAt,
+                1043,
+                "pnu-lab",
+                "pot-01",
+                "loam",
+                "basil",
+                "soil-v2",
+                31.2,
+                1847,
+                27.1,
+                58.0,
+                null,
+                true,
+                true,
+                false);
     }
 
     private CropScoreProfile profile(String cropCode, String cropName) {

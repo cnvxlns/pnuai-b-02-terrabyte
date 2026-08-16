@@ -43,6 +43,7 @@ export function DashboardScreen({
   const [chartRange, setChartRange] = useState<'1h' | '24h' | '7d' | '30d'>('24h');
   const { score: scoreData, measurements: latestData } = useDeviceEnvironment();
   const formulaDisclosure = useDisclosure();
+  const ppfd = latestData?.measurements.plantLightPpfdUmolM2S;
 
   const factorDetail = (key: string) => {
     const factor = scoreData?.factors.find((item) => item.key === key);
@@ -53,7 +54,7 @@ export function DashboardScreen({
   const stats = [
     { label: '온도', value: latestData ? `${latestData.measurements.airTemperatureC}℃` : '--', detail: factorDetail('temperature') },
     { label: '습도', value: latestData ? `${latestData.measurements.airHumidityPct}%` : '--', detail: factorDetail('humidity') },
-    { label: '광량', value: latestData ? `${latestData.measurements.plantLightPpfdUmolM2S.toLocaleString('ko-KR')} PPFD` : '--', detail: factorDetail('plantLight') },
+    { label: '광량', value: ppfd == null ? '--' : `${ppfd.toLocaleString('ko-KR')} PPFD`, detail: ppfd == null ? '광량 센서 측정 불가' : factorDetail('plantLight') },
     { label: '토양수분', value: latestData ? `${latestData.measurements.soilMoisturePct}%` : '--', detail: '종합 적합도 산식에서는 제외' },
   ];
   const displayFactors = scoreData?.factors ?? factors.slice(0, 3);

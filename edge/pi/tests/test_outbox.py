@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import tempfile
 import unittest
@@ -6,7 +8,7 @@ from terrabyte_edge.outbox import Outbox, OutboxFullError
 from terrabyte_edge.protocol import Event
 
 
-def event(event_id: str = "event-1") -> Event:
+def event(event_id: str = "event-1", ppfd: float | None = 300.0) -> Event:
     return Event(
         event_id=event_id,
         context_id="ctx-1",
@@ -16,7 +18,7 @@ def event(event_id: str = "event-1") -> Event:
         uptime_ms=100,
         air_temperature_c=20.0,
         relative_humidity_pct=50.0,
-        ppfd_umol_m2_s=300.0,
+        ppfd_umol_m2_s=ppfd,
     )
 
 
@@ -49,6 +51,19 @@ class OutboxTests(unittest.TestCase):
         item = reopened.due(10)[0]
         self.assertEqual(item.event, event())
         self.assertEqual(reopened.counts(), (1, 0))
+
+    def test_null_ppfd_survives_reopening(self) -> None:
+        self.assertTrue(self.outbox.enqueue(event(ppfd=None)))
+
+        reopened = Outbox(
+            self.path,
+            retry_base_seconds=2.0,
+            retry_max_seconds=10.0,
+            clock=lambda: self.now[0],
+        )
+        item = reopened.due(10)[0]
+        self.assertIsNone(item.event.ppfd_umol_m2_s)
+        self.assertIn("ppfd_umol_m2_s", item.event.to_record())
 
     def test_retry_is_delayed_with_capped_exponential_backoff(self) -> None:
         self.outbox.enqueue(event())

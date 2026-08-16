@@ -35,14 +35,17 @@ uses 115200 baud after the sketch starts.
   calibration. Both soil adapters are disabled by default.
 - GY-30/BH1750 illuminance is read over I2C using A4/SDA and A5/SCL. The
   default address is `0x23` with ADD connected to GND.
-- PPFD is **disabled by default**, so the firmware emits `sensor_status` rather
-  than a telemetry record until a valid GY-30 lux-to-PPFD calibration is
-  configured. The measured lux value is still present in `sensor_status`.
+- PPFD is **disabled by default**. It is nullable and does not gate telemetry,
+  so valid temperature and humidity can still be emitted without a calibrated
+  PPFD reading. When the GY-30 adapter is enabled, illuminance remains a
+  configured required field and an unavailable or invalid lux reading emits
+  `sensor_status`.
 - GY-30 measures illuminance in lux, not PPFD. Lux must not be labelled
   `ppfd_umol_m2_s` without calibration against a reference PAR/PPFD meter using
   the final light source and geometry.
 - `NaN`, infinity, missing readings, and values outside configured ranges are
-  rejected. Invalid samples are never sent as telemetry.
+  rejected. Invalid required readings are never sent as telemetry; invalid
+  PPFD is represented by JSON `null`.
 
 ## Provisioning
 
@@ -142,7 +145,7 @@ conversion coefficients and calibrated lux bounds:
 #define TB_GY30_PPFD_CALIBRATION_ENABLED 1
 #define TB_PPFD_PER_LUX 0.0123f
 #define TB_PPFD_OFFSET -1.25f
-#define TB_PPFD_CALIBRATED_MIN_LUX 100.0f
+#define TB_PPFD_CALIBRATED_MIN_LUX 0.0f
 #define TB_PPFD_CALIBRATED_MAX_LUX 50000.0f
 ```
 
@@ -218,17 +221,27 @@ A complete, validated sample is emitted as:
 {"message_type":"telemetry","protocol_version":1,"node_id":"terrabyte-node-001","sequence":42,"uptime_ms":215000,"air_temperature_c":24.30,"relative_humidity_pct":58.10,"ppfd_umol_m2_s":421.75,"illuminance_lux":18420.83,"soil_temperature_c":19.40,"soil_moisture_pct":63.25}
 ```
 
-If any required field is unavailable or invalid, no telemetry is fabricated:
+PPFD is not a required telemetry field. If it is unavailable or invalid while
+the configured required fields are valid, telemetry uses an explicit JSON
+`null`:
 
 ```json
-{"message_type":"sensor_status","protocol_version":1,"node_id":"terrabyte-node-001","sequence":43,"uptime_ms":220000,"validity":{"air_temperature_c":true,"relative_humidity_pct":true,"ppfd_umol_m2_s":false,"illuminance_lux":true,"soil_temperature_c":true,"soil_moisture_pct":true},"illuminance_lux":18420.83,"reason":"sensor_unavailable_or_out_of_range"}
+{"message_type":"telemetry","protocol_version":1,"node_id":"terrabyte-node-001","sequence":43,"uptime_ms":220000,"air_temperature_c":24.30,"relative_humidity_pct":58.10,"ppfd_umol_m2_s":null,"illuminance_lux":18420.83,"soil_temperature_c":19.40,"soil_moisture_pct":63.25}
+```
+
+If any configured required field is unavailable or invalid, no telemetry is
+fabricated:
+
+```json
+{"message_type":"sensor_status","protocol_version":1,"node_id":"terrabyte-node-001","sequence":44,"uptime_ms":225000,"validity":{"air_temperature_c":false,"relative_humidity_pct":true,"ppfd_umol_m2_s":false,"illuminance_lux":true,"soil_temperature_c":true,"soil_moisture_pct":true},"illuminance_lux":18420.83,"reason":"sensor_unavailable_or_out_of_range"}
 ```
 
 The two soil keys are emitted only when their adapters are enabled. The GY-30
-lux key is emitted when its adapter is enabled, including in `sensor_status`
-when PPFD calibration is unavailable. The current Orange Pi/backend v1 contract
-accepts the serial record but forwards only air temperature, relative humidity,
-and calibrated PPFD. Persisting lux or soil measurements requires a separately
+lux key is emitted when its adapter is enabled. `sensor_status.validity` keeps
+reporting PPFD validity when a required field rejects the sample; telemetry
+otherwise communicates the same state through numeric PPFD versus JSON `null`.
+The Orange Pi must preserve nullable PPFD when forwarding air temperature and
+relative humidity. Persisting lux or soil measurements requires a separately
 versioned edge/backend contract instead of silently relabelling an existing
 field.
 

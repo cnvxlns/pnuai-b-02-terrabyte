@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from types import SimpleNamespace
 import unittest
 
@@ -7,7 +9,7 @@ from terrabyte_edge.protocol import Event
 from terrabyte_edge.service import BridgeService
 
 
-def event(event_id: str) -> Event:
+def event(event_id: str, ppfd: float | None = 300.0) -> Event:
     return Event(
         event_id=event_id,
         context_id="ctx-1",
@@ -17,7 +19,7 @@ def event(event_id: str) -> Event:
         uptime_ms=100,
         air_temperature_c=20.0,
         relative_humidity_pct=50.0,
-        ppfd_umol_m2_s=300.0,
+        ppfd_umol_m2_s=ppfd,
     )
 
 
@@ -78,6 +80,24 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(backend.sent, ["oldest"])
         self.assertEqual(outbox.retried, ["oldest"])
         self.assertEqual(outbox.delivered, [])
+
+    def test_null_ppfd_event_is_uploaded_without_service_filtering(self) -> None:
+        outbox = FakeOutbox()
+        outbox.items = [OutboxItem(event("no-light", ppfd=None), 0)]
+        backend = FakeBackend()
+        settings = SimpleNamespace(
+            upload_batch_size=20,
+            http_timeout_seconds=1.0,
+        )
+        service = BridgeService(
+            settings,
+            outbox=outbox,
+            backend=backend,
+            serial_reader=object(),
+        )
+
+        self.assertEqual(service._upload_once(), 1)
+        self.assertEqual(backend.sent, ["no-light"])
 
 
 if __name__ == "__main__":

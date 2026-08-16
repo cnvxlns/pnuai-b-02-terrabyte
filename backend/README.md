@@ -193,6 +193,11 @@ JSON
 
 성공하면 HTTP `202 Accepted`가 반환됩니다. 여러 건을 연속 전송할 때는 `sequence`도 새 값으로 변경하는 것이 좋습니다.
 
+광량 센서가 없거나 고장 난 경우에는 `plant_light_ppfd_umol_m2_s`를 `null`,
+`light_sensor_valid`를 `false`로 보내면 온도·습도 등 나머지 측정값은 계속 저장됩니다.
+이 경우 최신 측정값 조회는 광량을 `null`로 반환하고 환경 적합도 조회는
+`422 SCORE_INPUT_INCOMPLETE`를 반환합니다.
+
 ### 5. 화면에서 확인
 
 1. `http://localhost:8081`에 접속합니다.

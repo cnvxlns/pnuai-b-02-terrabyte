@@ -40,11 +40,17 @@ public class EnvironmentScoreService {
         if (pot.cropCode() == null) {
             throw notFound("CROP_NOT_SELECTED", "환경 적합도를 계산할 작물을 먼저 선택해 주세요.");
         }
-        if (!sample.airSensorValid() || !sample.lightSensorValid()) {
+        if (sample.plantLightPpfdUmolM2S() == null || !sample.lightSensorValid()) {
+            throw new ApiException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "SCORE_INPUT_INCOMPLETE",
+                    "광량 측정값이 없어 환경 적합도를 계산할 수 없습니다.");
+        }
+        if (!sample.airSensorValid()) {
             throw new ApiException(
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "INVALID_SCORE_INPUT",
-                    "온도·습도·광량 센서값이 모두 유효해야 점수를 계산할 수 있습니다.");
+                    "온도·습도 센서값이 유효해야 점수를 계산할 수 있습니다.");
         }
         CropScoreProfile profile = profileRepository.findActiveByCropCode(pot.cropCode())
                 .orElseThrow(() -> notFound("CROP_PROFILE_NOT_FOUND", "작물 점수 기준을 찾을 수 없습니다."));
