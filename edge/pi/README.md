@@ -110,9 +110,11 @@ journalctl -u terrabyte-edge -f
 
 ## 설정
 
-필수 환경 변수는 `TB_SERIAL_PORT`, `TB_BACKEND_BASE_URL`,
-`TB_CROP_CONTEXT_ID`, `TB_DEVICE_ID`, `TB_EXPECTED_NODE_ID`와 인증 토큰입니다.
-serial의 `node_id`가 `TB_EXPECTED_NODE_ID`와 다르면 관측을 저장하지 않습니다.
+필수 환경 변수는 `TB_SERIAL_PORTS`, `TB_BACKEND_BASE_URL`,
+`TB_CROP_CONTEXT_ID`, `TB_DEVICE_ID`, `TB_EXPECTED_NODE_IDS`와 인증 토큰입니다.
+serial의 `node_id`가 `TB_EXPECTED_NODE_IDS` 목록에 없으면 관측을 저장하지 않습니다.
+단수형 `TB_SERIAL_PORT`·`TB_EXPECTED_NODE_ID`도 계속 인식하므로 기존 보드의 env는
+그대로 두어도 됩니다.
 토큰은
 `TB_DEVICE_TOKEN_FILE`을 권장하며, 개발할 때만 `TB_DEVICE_TOKEN`을 직접
 사용할 수 있습니다. 둘을 동시에 설정하면 시작을 거부합니다. 전체 기본값은
@@ -130,9 +132,69 @@ pending/dead row 수를 경보로 연결해야 합니다.
 명시해야만 허용됩니다. Orange Pi 시각이 `TB_CLOCK_MINIMUM_UTC`보다 이르면 NTP가
 동기화되지 않은 것으로 보고 관측을 폐기합니다.
 
+## 화분 여러 개 연결하기
+
+게이트웨이 하나가 아두이노를 최대 4대까지 받습니다. 포트마다 읽기 스레드가 하나씩 돌고,
+어느 화분의 측정값인지는 **아두이노가 보내는 `node_id`로 판별합니다.** 포트 순서가 아닙니다.
+따라서 케이블을 다른 소켓으로 옮겨도 데이터 귀속은 바뀌지 않습니다.
+
+아두이노마다 `TelemetryConfig.local.h`의 `TB_NODE_ID`를 **서로 다르게** 굽고,
+그 값들을 `TB_EXPECTED_NODE_IDS`에 나열하세요.
+
+### 포트 경로 고르기 — CH340이면 `by-path`를 쓰세요
+
+`/dev/ttyUSB0` 같은 이름은 부팅 순서에 따라 바뀌므로 쓰지 않습니다. 안정적인 심볼릭 링크는
+두 종류가 있고, **USB-시리얼 칩에 따라 선택이 갈립니다.**
+
+| 경로 | 조건 | 주의 |
+|---|---|---|
+| `/dev/serial/by-id/` | 어댑터에 고유 시리얼 번호가 있을 때만 | CH340(`1a86`)에는 없습니다 |
+| `/dev/serial/by-path/` | 항상 유일 (물리 USB 포트 기준) | 케이블을 다른 소켓에 꽂으면 경로가 바뀝니다 |
+
+이름만 보면 구분됩니다. `usb-1a86_USB_Serial-if00-port0`에는 시리얼 번호가 없고,
+`usb-Arduino_Uno_A1B2C3-if00`에는 있습니다. **시리얼 번호가 없는 어댑터를 두 개 이상 꽂으면
+`by-id` 이름이 서로 겹쳐 한쪽만 살아남고 나머지 화분이 조용히 사라집니다.**
+
+```bash
+ls -l /dev/serial/by-id/ /dev/serial/by-path/
+```
+
+### 같은 펌웨어를 두 대에 구웠을 때
+
+가장 흔한 실수입니다. 같은 `node_id`가 두 포트에서 보이면 두 번째 포트를 `중복 노드` 오류로
+표시하고 그 측정값을 버립니다. 이걸 잡지 않으면 서로 다른 화분의 값이 한 이력에 섞여 들어가고도
+그럴듯해 보입니다. 화면에서 바로 확인할 수 있습니다.
+
+## 모니터 상태판
+
+모니터를 연결하면 화분 4개의 상태와 6자리 등록 번호가 전체화면으로 보입니다.
+
+```bash
+# 수동 실행
+python -m terrabyte_edge dashboard
+python -m terrabyte_edge dashboard --windowed     # 개발용 창 모드
+```
+
+부팅 시 자동 실행하려면 데스크톱 자동시작에 등록합니다.
+
+```bash
+sudo apt install python3-tk
+sudo cp deploy/terrabyte-dashboard.desktop /etc/xdg/autostart/
+```
+
+브릿지가 `/run/terrabyte-edge/status.json`에 1초마다 상태를 쓰고 상태판이 그걸 읽습니다.
+두 프로세스는 완전히 분리되어 있어 **상태판이 죽어도 텔레메트리는 영향받지 않습니다.**
+스냅샷이 8초 이상 낡으면 상태판이 "브리지 서비스 응답 없음"을 띄웁니다 — 죽은 값을 살아 있는
+것처럼 보여주지 않기 위해서입니다.
+
+> 텍스트 콘솔(tty)이 아니라 데스크톱 세션 안에서 돕니다. 리눅스 콘솔 폰트는 글리프 512개가
+> 상한이라 한글이 렌더링되지 않고, Orange Pi 이미지는 `graphical.target`으로 부팅해
+> lightdm이 이미 tty1을 쓰고 있습니다.
+
 ## 테스트
 
-테스트에는 외부 서버, serial 장치, pyserial이 필요하지 않습니다.
+테스트에는 외부 서버, serial 장치, pyserial, 화면이 필요하지 않습니다.
+표시 로직은 순수 함수로 분리되어 있어 Tk 없이 검증합니다.
 
 ```bash
 cd edge/pi

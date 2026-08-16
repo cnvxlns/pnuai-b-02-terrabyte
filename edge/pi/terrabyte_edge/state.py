@@ -286,6 +286,11 @@ def write_snapshot(path: Path, snapshot: GatewaySnapshot) -> None:
             json.dump(snapshot.to_json_dict(), handle, ensure_ascii=False)
             handle.flush()
             os.fsync(handle.fileno())
+        # The display runs as a different, unprivileged user, and the bridge
+        # unit sets UMask=0077 while NamedTemporaryFile creates 0600 — without
+        # this the screen can never read the file it exists to show. The
+        # snapshot deliberately carries no credentials.
+        os.chmod(handle.name, 0o644)
         os.replace(handle.name, path)
     except BaseException:
         try:
