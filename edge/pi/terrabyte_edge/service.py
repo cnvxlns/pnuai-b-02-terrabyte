@@ -6,13 +6,14 @@ from dataclasses import replace
 import json
 import logging
 from threading import Event, Thread
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from .backend import HttpPublisher
+from .command_relay import CommandJournal, CommandRelay
 from .config import Settings
 from .irrigation.volume import MODEL_VERSION, suggest_volume_ml
 from .mqtt_publisher import MqttPublisher
-from .outbox import KIND_TELEMETRY, Outbox, OutboxFullError
+from .outbox import KIND_ACK, KIND_TELEMETRY, Outbox, OutboxFullError
 from .protocol import (
     # Aliased because ``Event`` already means threading's here, and renaming
     # that would touch every worker loop.
@@ -23,7 +24,7 @@ from .protocol import (
     UnknownNodeError,
     parse_line,
 )
-from .publisher import Delivery, Publisher
+from .publisher import CommandTransport, Delivery, DeliveryResult, Publisher
 from .serial_reader import SerialLineReader
 from .state import GatewayState, write_snapshot
 
@@ -33,6 +34,11 @@ LOGGER = logging.getLogger(__name__)
 # (port, raw line, decoded envelope). The raw line is kept in the signature
 # because a family's validator may want to decide from the bytes alone.
 SerialRoute = Callable[[str, bytes, dict], None]
+
+# What the on-screen event log calls each queue kind. The screen is Korean and
+# read by whoever is standing at the box, so the internal kind name must not leak
+# into it.
+_KIND_LABELS = {KIND_TELEMETRY: "측정값", KIND_ACK: "관수 결과"}
 
 
 def _build_publisher(settings: Settings) -> Publisher:
@@ -66,6 +72,7 @@ class BridgeService:
         publisher: Publisher | None = None,
         serial_readers: Sequence[SerialLineReader] | None = None,
         state: GatewayState | None = None,
+        command_relay: CommandRelay | None = None,
     ) -> None:
         self.settings = settings
         self.stop_event = Event()
@@ -103,6 +110,46 @@ class BridgeService:
             "message_type": self._ingest_telemetry,
             "t": self._ingest_short_key_frame,
         }
+        self.command_relay = (
+            command_relay if command_relay is not None else self._build_command_relay()
+        )
+
+    def _build_command_relay(self) -> CommandRelay | None:
+        """The relay, or None when this deployment cannot carry commands.
+
+        Two ways it stays absent. ``TB_COMMAND_RELAY_ENABLED=false`` is the
+        operator's kill switch. The transport check is structural: HTTP has no
+        command downlink in the contract at all — no topic to subscribe to and no
+        ack endpoint — so under ``TB_TRANSPORT=http`` there is nothing to relay.
+        Building a relay that could never receive anything would give the
+        misleading impression that commands were being waited for.
+        """
+
+        if not getattr(self.settings, "command_relay_enabled", False):
+            LOGGER.info("command relay disabled by configuration")
+            return None
+        if not isinstance(self.publisher, CommandTransport):
+            LOGGER.info(
+                "transport %s carries no command downlink; relay not started",
+                getattr(self.settings, "transport", "?"),
+            )
+            return None
+        return CommandRelay(
+            gateway_id=self.settings.device_id,
+            transport=self.publisher,
+            outbox=self.outbox,
+            state=self.state,
+            readers=self.serial_readers,
+            journal=CommandJournal(
+                self.settings.database_path,
+                retention_seconds=self.settings.command_journal_retention_seconds,
+            ),
+            stop_event=self.stop_event,
+            queue_max=self.settings.command_queue_max,
+            deadman_interval_seconds=self.settings.command_deadman_interval_seconds,
+            deadman_grace_seconds=self.settings.command_deadman_grace_seconds,
+            max_serial_bytes=self.settings.command_max_serial_bytes,
+        )
 
     def _critical_workers(self) -> list[tuple[str, Callable[[], None]]]:
         """Workers whose death means the gateway is not doing its job.
@@ -115,7 +162,7 @@ class BridgeService:
         separately below).
         """
 
-        return [
+        workers: list[tuple[str, Callable[[], None]]] = [
             ("backend-upload", self._upload_loop),
             # The snapshot writer is its own thread rather than a tick inside
             # the uploader. The uploader blocks for up to the publish timeout on
@@ -124,6 +171,15 @@ class BridgeService:
             # they need.
             ("status-snapshot", self._snapshot_loop),
         ]
+        if self.command_relay is not None:
+            # Three more, and all three are fatal by construction. A dead relay
+            # means commands are being accepted by the broker and silently never
+            # executed; a dead deadman means a running pump loses its keepalive;
+            # a dead ack uploader means every dose becomes a phantom budget
+            # deduction. None of those is survivable the way one dead port is.
+            workers.extend(self.command_relay.workers())
+            workers.append(("ack-upload", self._ack_upload_loop))
+        return workers
 
     def start(self) -> None:
         self.outbox.initialize()
@@ -277,19 +333,33 @@ class BridgeService:
     def _ingest_short_key_frame(
         self, port: str, line: bytes, message: dict[str, object]
     ) -> None:
-        """Placeholder route for the short-key family (``{"t": ...}``).
+        """The short-key family (``{"t": ...}``) — command acks, so far.
 
-        Live rather than commented out on purpose: an ack that arrives before
-        its handler exists must say so plainly instead of being misreported as
-        malformed telemetry. S-B replaces this body; the routing above does not
-        change.
+        Handled on the ingest thread but only as far as a local SQLite write: the
+        translated ack is queued and the ack-upload worker publishes it. A broker
+        round-trip here would sit in the same loop that reads telemetry, so a
+        stalled broker would stop the readings too.
         """
 
-        LOGGER.warning(
-            "short-key serial frame has no handler yet port=%s t=%s",
-            port,
-            message.get("t"),
-        )
+        if message.get("t") != "ack":
+            LOGGER.warning(
+                "discarding short-key serial frame with no handler port=%s t=%s",
+                port,
+                message.get("t"),
+            )
+            self.state.record_error(port)
+            return
+        if self.command_relay is None:
+            # An ack with no relay means the firmware is answering commands this
+            # build never sent — a stale queued frame, or a second host on the
+            # same cable. Worth saying out loud rather than dropping silently.
+            LOGGER.warning(
+                "received a command ack with no relay configured port=%s id=%s",
+                port,
+                message.get("id"),
+            )
+            return
+        self.command_relay.handle_serial_ack(port, message)
 
     def _ingest_telemetry(
         self, port: str, line: bytes, message: dict[str, object]
@@ -359,29 +429,58 @@ class BridgeService:
             if uploaded == 0:
                 self.stop_event.wait(self.settings.upload_interval_seconds)
 
-    def _upload_once(self, kind: str = KIND_TELEMETRY) -> int:
+    def _ack_upload_loop(self) -> None:
+        """The second drain, for command outcomes.
+
+        A separate thread from the telemetry uploader, not a second call inside
+        it. The head-of-line block in ``_upload_once`` is per kind by design, but
+        the *thread* would still be shared: a telemetry batch that is mid-backoff
+        against a dead broker holds this thread for the whole publish timeout, and
+        an ack delayed that long is one the backend has already expired — after
+        which it charges the granted volume to the daily budget anyway. Separate
+        threads are what make the per-kind block actually mean anything.
+        """
+
+        assert self.command_relay is not None  # only started when a relay exists
+        while not self.stop_event.is_set():
+            # Resolved per iteration rather than bound once: this thread outlives
+            # any single publisher state, and a captured bound method would keep
+            # calling a transport the publisher has since replaced.
+            uploaded = self._upload_once(KIND_ACK, send=self.publisher.send_ack)
+            if uploaded == 0:
+                self.stop_event.wait(self.settings.upload_interval_seconds)
+
+    def _upload_once(
+        self,
+        kind: str = KIND_TELEMETRY,
+        *,
+        send: Callable[[Any], DeliveryResult] | None = None,
+    ) -> int:
         """Drain one batch of one kind.
 
         Scoped to a kind rather than to the whole table because the ``break``
         below is the head-of-line block that keeps observations in capture
-        order, and that block must not reach across kinds. A second worker
-        draining ``KIND_ACK`` — which needs its own publish path, not this
-        telemetry one — is S-B's to add; the queue and this signature are
-        already shaped for it.
+        order, and that block must not reach across kinds.
+
+        ``send`` is the publish path for this kind — acks go to a different topic
+        with a different payload shape. Parameterised rather than duplicated so
+        the retry, dead-letter and ordering rules below exist once: an ack path
+        with its own copy of this loop would be the place those rules drift.
         """
 
+        publish = send or self.publisher.send
         items = self.outbox.due(self.settings.upload_batch_size, kind=kind)
         processed = 0
         for item in items:
             if self.stop_event.is_set():
                 break
-            result = self.publisher.send(item.event)
+            result = publish(item.event)
             processed += 1
             event_id = item.event.event_id
             if result.outcome is Delivery.DELIVERED:
                 self.outbox.mark_delivered(event_id)
                 self.state.record_delivery()
-                LOGGER.info("telemetry delivered event_id=%s", event_id)
+                LOGGER.info("%s delivered event_id=%s", kind, event_id)
             elif result.outcome is Delivery.RETRY:
                 delay = self.outbox.mark_retry(
                     event_id,
@@ -391,7 +490,8 @@ class BridgeService:
                 )
                 self.state.record_transport(connected=False, error=result.reason)
                 LOGGER.warning(
-                    "telemetry retry event_id=%s reason=%s delay_seconds=%.1f",
+                    "%s retry event_id=%s reason=%s delay_seconds=%.1f",
+                    kind,
                     event_id,
                     result.reason,
                     delay,
@@ -401,9 +501,12 @@ class BridgeService:
                 break
             else:
                 self.outbox.mark_dead(event_id, result.reason)
-                self.state.add_event("error", f"측정값 폐기: {result.reason}")
+                self.state.add_event(
+                    "error", f"{_KIND_LABELS.get(kind, kind)} 폐기: {result.reason}"
+                )
                 LOGGER.error(
-                    "telemetry quarantined event_id=%s reason=%s",
+                    "%s quarantined event_id=%s reason=%s",
+                    kind,
                     event_id,
                     result.reason,
                 )

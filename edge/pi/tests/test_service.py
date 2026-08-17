@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 import unittest
 
 from terrabyte_edge.outbox import KIND_TELEMETRY, OutboxItem
@@ -212,6 +213,89 @@ class RecordingOutbox:
     def enqueue(self, event):
         self.events.append(event)
         return True
+
+
+class CommandRelayWiringTests(unittest.TestCase):
+    """Whether the relay exists at all, and what the short-key route does with it."""
+
+    def build(self, *, publisher, enabled=True, transport="mqtt", **extra):
+        settings = SimpleNamespace(
+            upload_batch_size=20,
+            upload_interval_seconds=1.0,
+            http_timeout_seconds=1.0,
+            device_id="orangepi-test",
+            claim_code="483920",
+            transport=transport,
+            database_path=Path("/nonexistent/outbox.sqlite3"),
+            command_relay_enabled=enabled,
+            command_queue_max=8,
+            command_deadman_interval_seconds=1.0,
+            command_deadman_grace_seconds=5.0,
+            command_max_serial_bytes=120,
+            command_journal_retention_seconds=86_400.0,
+            **extra,
+        )
+        return BridgeService(
+            settings,
+            outbox=FakeOutbox(),
+            publisher=publisher,
+            serial_readers=[],
+        )
+
+    def test_http_transport_gets_no_relay(self) -> None:
+        """HTTP has no command downlink in the contract — no topic, no ack path.
+
+        A relay that could never receive anything would suggest the gateway was
+        waiting for commands when nothing could ever arrive.
+        """
+
+        service = self.build(publisher=FakePublisher(), transport="http")
+        self.assertIsNone(service.command_relay)
+        self.assertNotIn(
+            "command-relay", [name for name, _ in service._critical_workers()]
+        )
+
+    def test_the_kill_switch_removes_the_relay_and_its_workers(self) -> None:
+        service = self.build(publisher=CommandCapablePublisher(), enabled=False)
+        self.assertIsNone(service.command_relay)
+
+    def test_a_command_capable_transport_gets_the_relay_and_four_workers(self) -> None:
+        service = self.build(publisher=CommandCapablePublisher())
+        self.assertIsNotNone(service.command_relay)
+        names = [name for name, _ in service._critical_workers()]
+        self.assertEqual(
+            names,
+            [
+                "backend-upload",
+                "status-snapshot",
+                "command-relay",
+                "command-deadman",
+                "ack-upload",
+            ],
+        )
+
+    def test_the_short_key_route_reaches_the_relay(self) -> None:
+        service = self.build(publisher=CommandCapablePublisher())
+        seen = []
+        service.command_relay.handle_serial_ack = lambda port, message: seen.append(
+            (port, message)
+        )
+
+        service._ingest_line(PORT, b'{"t":"ack","id":"c1","ph":"accepted"}\n')
+        self.assertEqual(seen, [(PORT, {"t": "ack", "id": "c1", "ph": "accepted"})])
+
+    def test_an_unknown_short_key_frame_is_counted_against_the_port(self) -> None:
+        service = self.build(publisher=CommandCapablePublisher())
+        service._ingest_line(PORT, b'{"t":"surprise"}\n')
+        self.assertEqual(service.state.snapshot().ports[0].errors, 1)
+
+
+class CommandCapablePublisher(FakePublisher):
+    def send_ack(self, ack):
+        return DeliveryResult(Delivery.DELIVERED, "puback")
+
+    def subscribe_commands(self, handler):
+        self.handler = handler
 
 
 if __name__ == "__main__":
