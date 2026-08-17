@@ -88,11 +88,11 @@ SUPPORTED_CROP_CODES = frozenset(CROP_TARGET_MOISTURE_PCT) - {"unknown"}
 # here is comparable with one computed there.
 DEFAULT_SOIL_TEMPERATURE_C = 20.0
 DEFAULT_PPFD_UMOL_M2_S = 0.0  # night; the dark end is the conservative guess
-# The edge tracks no irrigation history, so in practice this default is what
-# every suggestion uses. Three days is long enough for the redistribution term
-# below to have decayed to nothing, i.e. "assume no recent watering is still
-# spreading" -- the assumption that under-states rather than over-states how
-# wet the pot already is.
+# Used when the irrigation log has no record for this pot -- it has never been
+# watered by this gateway, or the log could not be read. Three days is long enough
+# for the redistribution term below to have decayed to nothing, i.e. "assume no
+# recent watering is still spreading" -- the assumption that under-states rather
+# than over-states how wet the pot already is.
 DEFAULT_HOURS_SINCE_LAST_IRRIGATION = 72.0
 
 

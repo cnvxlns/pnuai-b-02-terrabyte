@@ -78,6 +78,11 @@ class FakeOutbox:
 def settings(ports, nodes, snapshot_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         serial_ports=tuple(ports),
+        # Never opened. BridgeService builds an IrrigationHistory from it, but
+        # constructing one touches no disk, and the readings below carry no soil
+        # moisture — so the whole irrigation pass is skipped and nothing queries
+        # the log. Same convention as the unused snapshot path above.
+        database_path=Path("/tmp/unused-outbox.sqlite3"),
         expected_node_ids=frozenset(nodes),
         crop_context_id="ctx-1",
         clock_minimum_utc=MINIMUM_CLOCK,
