@@ -2,11 +2,16 @@
 
 from .decision import (
     FIXED_VOLUME_ML,
+    LARGE_POT_DOSE_ML,
+    REFERENCE_DOSE_ML,
+    SERVER_DAILY_BUDGET_ML,
     EnvelopeLimits,
     IrrigationDecider,
     IrrigationDecision,
     Verdict,
     VolumeSource,
+    daily_budget_ml_for,
+    reference_dose_ml,
 )
 from .features import FEATURE_NAMES, INPUT_SCHEMA_VERSION, FeatureError, IrrigationFeatures
 from .forest import ModelError, RandomForestClassifier, RandomForestVote
@@ -16,7 +21,10 @@ __all__ = [
     "FEATURE_NAMES",
     "FIXED_VOLUME_ML",
     "INPUT_SCHEMA_VERSION",
+    "LARGE_POT_DOSE_ML",
     "MODEL_VERSION",
+    "REFERENCE_DOSE_ML",
+    "SERVER_DAILY_BUDGET_ML",
     "SUPPORTED_CROP_CODES",
     "EnvelopeLimits",
     "FeatureError",
@@ -28,5 +36,7 @@ __all__ = [
     "RandomForestVote",
     "Verdict",
     "VolumeSource",
+    "daily_budget_ml_for",
+    "reference_dose_ml",
     "suggest_volume_ml",
 ]

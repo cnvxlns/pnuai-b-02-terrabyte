@@ -7,6 +7,7 @@ from terrabyte_edge.irrigation import (
     FEATURE_NAMES,
     INPUT_SCHEMA_VERSION,
     FIXED_VOLUME_ML,
+    SERVER_DAILY_BUDGET_ML,
     EnvelopeLimits,
     FeatureError,
     IrrigationDecider,
@@ -15,8 +16,11 @@ from terrabyte_edge.irrigation import (
     RandomForestClassifier,
     Verdict,
     VolumeSource,
+    daily_budget_ml_for,
+    reference_dose_ml,
     suggest_volume_ml,
 )
+from terrabyte_edge.irrigation.decision import SERVER_DOSE_MAX_ML
 from terrabyte_edge.irrigation.forest import DEFAULT_MODEL_PATH
 
 
@@ -338,9 +342,9 @@ class InjectedVolumeTests(unittest.TestCase):
     def test_a_dose_larger_than_the_whole_budget_is_its_own_verdict(self) -> None:
         """Otherwise the pot is never watered and the log blames the budget.
 
-        EnvelopeLimits.daily_budget_ml is 120, which the server's own fallback
-        table exceeds for a pot over 6 L (160 mL). That deployment must be
-        distinguishable from "today's allowance is used up".
+        Shown against the bare 120 mL default, which the server's own fallback
+        table exceeds for a pot over 6 L (160 mL). A deployment that cannot water
+        at all must be distinguishable from "today's allowance is used up".
         """
 
         decision = IrrigationDecider(_StubModel(irrigate=True)).decide(
@@ -350,20 +354,133 @@ class InjectedVolumeTests(unittest.TestCase):
         self.assertNotEqual(decision.verdict, Verdict.DAILY_BUDGET_EXHAUSTED)
         self.assertFalse(decision.envelope_allows)
 
-    def test_the_default_budget_is_four_fixed_doses_and_the_interval_caps_four(
-        self,
-    ) -> None:
-        """Why the budget never fired before: it restated min_interval_hours.
 
-        Four 6-hour intervals fit in a day and four 30 mL doses fit in 120 mL, so
-        the budget could not bind before the interval did. A computed dose breaks
-        that coincidence, which is the whole reason the constant needs revisiting
-        against pot volume.
-        """
+class DailyBudgetDerivationTests(unittest.TestCase):
+    """The budget is a function of pot volume, not a constant.
 
-        limits = EnvelopeLimits.supervised()
+    It has to be, and the arithmetic below is why: at the fixed 30 mL dose this
+    module was written for, the 120 mL constant was exactly the four doses a
+    six-hour interval already permits. The budget restated the interval and could
+    never bind first — it never once fired. A computed dose breaks the coincidence,
+    and it breaks it hard: a 3 L lettuce pot at 12% soil moisture asks for 390 mL.
+    """
+
+    def test_the_old_constant_was_a_restatement_of_the_interval(self) -> None:
+        """Kept as a test because it is the finding, not just history."""
+
+        limits = EnvelopeLimits()
         self.assertEqual(limits.daily_budget_ml / FIXED_VOLUME_ML, 4.0)
         self.assertEqual(24.0 / limits.min_interval_hours, 4.0)
+
+    def test_the_reference_dose_follows_the_server_fallback_table(self) -> None:
+        """Borrowed rather than invented: §3.2 is the only documented answer."""
+
+        self.assertEqual(reference_dose_ml(800), 40.0)
+        self.assertEqual(reference_dose_ml(2000), 80.0)
+        self.assertEqual(reference_dose_ml(5000), 120.0)
+        self.assertEqual(reference_dose_ml(12000), 160.0)
+        # No configured pot volume means the decider will deliver the fallback
+        # dose, so the budget is derived from that same number.
+        self.assertEqual(reference_dose_ml(None), FIXED_VOLUME_ML)
+
+    def test_a_bigger_pot_gets_a_bigger_budget(self) -> None:
+        budgets = [
+            EnvelopeLimits.supervised(substrate_volume_ml=volume).daily_budget_ml
+            for volume in (1000, 3000, 6000, 12000)
+        ]
+        self.assertEqual(budgets, sorted(budgets))
+        self.assertEqual(budgets, [200.0, 320.0, 480.0, 600.0])
+
+    def test_the_edge_never_out_budgets_the_server(self) -> None:
+        """`D16`/`D17`: the edge stands in for the server and cannot widen it.
+
+        A 40 L planter would derive 640 mL from the table, above the Governor's own
+        per-pot daily budget.
+        """
+
+        limits = EnvelopeLimits.supervised(substrate_volume_ml=40_000)
+        self.assertEqual(limits.daily_budget_ml, SERVER_DAILY_BUDGET_ML)
+        self.assertLessEqual(
+            daily_budget_ml_for(1_000_000, min_interval_hours=0.5),
+            SERVER_DAILY_BUDGET_ML,
+        )
+
+    def test_no_budget_is_smaller_than_one_deliverable_dose(self) -> None:
+        """A budget below one dose is not a budget, it is a ban.
+
+        A 1 L pot derives 160 mL from the table and its own water balance asks for
+        159 mL at 12% moisture — one reading away from a pot that can never be
+        watered while the log blames the budget.
+        """
+
+        for volume in (None, 500, 1000, 3000, 12000):
+            with self.subTest(substrate_volume_ml=volume):
+                limits = EnvelopeLimits.supervised(substrate_volume_ml=volume)
+                self.assertGreaterEqual(limits.daily_budget_ml, SERVER_DOSE_MAX_ML)
+
+    def test_a_derived_budget_always_admits_the_first_dose(self) -> None:
+        """DOSE_EXCEEDS_DAILY_BUDGET is a misconfiguration verdict.
+
+        Every gated dose is clamped to the server's per-dose ceiling and every
+        derived budget is at least that, so a correctly configured pot cannot trip
+        it. It stays reachable for a hand-built limit set, which is where such a
+        mistake would actually be.
+        """
+
+        for volume in (None, 1000, 3000, 12000):
+            with self.subTest(substrate_volume_ml=volume):
+                decider = IrrigationDecider(
+                    _StubModel(irrigate=True),
+                    limits=EnvelopeLimits.supervised(substrate_volume_ml=volume),
+                )
+                decision = decider.decide(features(), volume_ml=SERVER_DOSE_MAX_ML)
+                self.assertTrue(decision.irrigate)
+
+    def test_the_budget_measures_volume_and_not_doses(self) -> None:
+        """The property the old constant could not have.
+
+        Same pot, same interval: a big dose buys fewer waterings a day than a small
+        one, and nothing counts waterings to decide that.
+        """
+
+        decider = IrrigationDecider(
+            _StubModel(irrigate=True),
+            limits=EnvelopeLimits.supervised(substrate_volume_ml=3000),
+        )
+        self.assertTrue(decider.decide(features(), volume_ml=200.0).irrigate)
+        self.assertEqual(
+            decider.decide(
+                features(), volume_ml=200.0, dispensed_today_ml=200.0
+            ).verdict,
+            Verdict.DAILY_BUDGET_EXHAUSTED,
+        )
+        # A 60 mL dose still fits after the same 200 mL has gone out.
+        self.assertTrue(
+            decider.decide(
+                features(), volume_ml=60.0, dispensed_today_ml=200.0
+            ).irrigate
+        )
+
+    def test_the_emergency_profile_is_not_derived(self) -> None:
+        """`D16` fixes the cloud-down cap at 120 mL — 60 mL twice, hardcoded.
+
+        Deriving it would widen the emergency envelope exactly when nobody is
+        watching, and this profile exists to be narrower than supervised
+        operation, not proportional to it.
+        """
+
+        for volume in (None, 1000, 12000):
+            with self.subTest(substrate_volume_ml=volume):
+                self.assertEqual(EnvelopeLimits.autonomous().daily_budget_ml, 120.0)
+        autonomous = EnvelopeLimits.autonomous()
+        self.assertLess(
+            autonomous.daily_budget_ml,
+            EnvelopeLimits.supervised(substrate_volume_ml=3000).daily_budget_ml,
+        )
+        self.assertGreater(
+            autonomous.min_interval_hours,
+            EnvelopeLimits.supervised(substrate_volume_ml=3000).min_interval_hours,
+        )
 
     def test_the_formula_and_the_decider_join_up(self) -> None:
         """One pass of the real seam, with no stub between them."""
