@@ -294,5 +294,55 @@ class MultiNodeConfigTests(unittest.TestCase):
         )
 
 
+class CommandRelayConfigTests(unittest.TestCase):
+    def test_the_downlink_topic_is_exact_not_a_wildcard(self) -> None:
+        """``dn/#`` would route dn/heartbeat into the command queue.
+
+        Two different concepts share the ``dn`` prefix: commands (QoS 1, judged
+        by the relay) and the 30-second Spring liveness heartbeat (QoS 0, for the
+        autonomy state machine).
+        """
+
+        settings = Settings.from_env(MQTT_ENV)
+        self.assertEqual(settings.mqtt_command_topic(), "tb/v2/gateway-1/dn/command")
+        self.assertEqual(settings.mqtt_ack_topic(), "tb/v2/gateway-1/up/ack")
+
+    def test_the_relay_is_on_by_default_with_a_kill_switch(self) -> None:
+        """The safety gate for the command path is the backend's dispatcher flag.
+
+        A gateway with nothing publishing upstream never receives a command, so
+        defaulting on keeps 3a to one switch in one place instead of two that can
+        disagree.
+        """
+
+        self.assertTrue(Settings.from_env(MQTT_ENV).command_relay_enabled)
+        self.assertFalse(
+            Settings.from_env(
+                dict(MQTT_ENV, TB_COMMAND_RELAY_ENABLED="false")
+            ).command_relay_enabled
+        )
+
+    def test_the_deadman_interval_cannot_exceed_the_firmware_watchdog(self) -> None:
+        """At 3 s or above the firmware would cut every legitimate dose short.
+
+        Caught at start-up rather than on a bench with water running.
+        """
+
+        self.assertEqual(
+            Settings.from_env(MQTT_ENV).command_deadman_interval_seconds, 1.0
+        )
+        with self.assertRaisesRegex(ConfigError, "deadman"):
+            Settings.from_env(
+                dict(MQTT_ENV, TB_COMMAND_DEADMAN_INTERVAL_SECONDS="3")
+            )
+
+    def test_the_serial_frame_ceiling_has_a_floor(self) -> None:
+        """Below the widest legal frame every command would be refused."""
+
+        self.assertEqual(Settings.from_env(MQTT_ENV).command_max_serial_bytes, 120)
+        with self.assertRaises(ConfigError):
+            Settings.from_env(dict(MQTT_ENV, TB_COMMAND_MAX_SERIAL_BYTES="16"))
+
+
 if __name__ == "__main__":
     unittest.main()

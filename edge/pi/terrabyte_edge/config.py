@@ -26,6 +26,10 @@ CLAIM_CODE = re.compile(r"^[0-9]{6}$")
 # hundreds of reader threads on a board with a few hundred MB of RAM.
 MAX_NODES = 4
 
+# Below the firmware's TB_HOST_TIMEOUT_MS (3000 ms, G3) with margin for a
+# blocked serial write. See the check in from_env.
+DEADMAN_MAX_INTERVAL_SECONDS = 2.0
+
 
 def _required(env: Mapping[str, str], name: str) -> str:
     value = env.get(name, "").strip()
@@ -261,6 +265,18 @@ class Settings:
     # fallback table (docs/design/irrigation_volume.md §2, §3.2).
     pot_substrate_ml: dict[str, int]
     pot_crop_codes: dict[str, str]
+    # --- command relay ---
+    # Defaulted so a caller that builds Settings directly (tests, tools) keeps
+    # working, and so an existing /etc/terrabyte-edge.env needs no edit to get
+    # the relay: the safety gate for the whole command path is the backend's
+    # dispatcher, which ships disabled. A gateway with no command publisher
+    # upstream simply never receives anything on dn/command.
+    command_relay_enabled: bool = True
+    command_queue_max: int = 32
+    command_deadman_interval_seconds: float = 1.0
+    command_deadman_grace_seconds: float = 5.0
+    command_max_serial_bytes: int = 120
+    command_journal_retention_seconds: float = 86_400.0
 
     def substrate_volume_ml_for(self, node_id: str) -> int | None:
         return self.pot_substrate_ml.get(node_id)
@@ -273,6 +289,20 @@ class Settings:
 
     def mqtt_status_topic(self) -> str:
         return f"{self.mqtt_topic_prefix}/{self.device_id}/up/status"
+
+    def mqtt_ack_topic(self) -> str:
+        return f"{self.mqtt_topic_prefix}/{self.device_id}/up/ack"
+
+    def mqtt_command_topic(self) -> str:
+        """The one downlink topic this gateway subscribes to.
+
+        Not a wildcard. ``dn/#`` would also pick up ``dn/heartbeat`` (30 s QoS 0,
+        Spring's liveness signal), which is a different concept with a different
+        consumer — the autonomy state machine, not the relay. Subscribing to both
+        through one filter would route heartbeats into the command queue.
+        """
+
+        return f"{self.mqtt_topic_prefix}/{self.device_id}/dn/command"
 
     def telemetry_url(self) -> str:
         """Envelope v2 debug/fallback endpoint.
@@ -360,6 +390,21 @@ class Settings:
         if claim_code and CLAIM_CODE.fullmatch(claim_code) is None:
             raise ConfigError("TB_CLAIM_CODE must be exactly six digits")
 
+        # The firmware stops the pump after TB_HOST_TIMEOUT_MS (3000) of silence
+        # from the host (G3). A tick interval at or above that would cut every
+        # legitimate dose short every few seconds and look like flaky hardware,
+        # so the ceiling is enforced here with margin rather than discovered on a
+        # bench with water running.
+        deadman_interval = _number(
+            values, "TB_COMMAND_DEADMAN_INTERVAL_SECONDS", 1.0, minimum=0.1
+        )
+        if deadman_interval > DEADMAN_MAX_INTERVAL_SECONDS:
+            raise ConfigError(
+                "TB_COMMAND_DEADMAN_INTERVAL_SECONDS must be at most "
+                f"{DEADMAN_MAX_INTERVAL_SECONDS} so the firmware's 3 s deadman "
+                "watchdog cannot fire during a legitimate dose"
+            )
+
         # The pot maps were written keyed by node id so they would survive a
         # multi-node gateway without their parsing changing; TB_EXPECTED_NODE_IDS
         # is that gateway, so the allowlist is simply the parsed list. Building
@@ -440,5 +485,23 @@ class Settings:
                 "TB_POT_CROPS",
                 known_node_ids=known_node_ids,
                 parse_value=_crop_code("TB_POT_CROPS"),
+            ),
+            command_relay_enabled=_boolean(
+                values, "TB_COMMAND_RELAY_ENABLED", True
+            ),
+            command_queue_max=_integer(values, "TB_COMMAND_QUEUE_MAX", 32),
+            command_deadman_interval_seconds=deadman_interval,
+            command_deadman_grace_seconds=_number(
+                values, "TB_COMMAND_DEADMAN_GRACE_SECONDS", 5.0, minimum=0.5
+            ),
+            # 96 bytes covers the widest legal frame — a 26-character ULID with
+            # both ms and ml — and 120 leaves room for a longer command_id
+            # without reaching a size that could overrun the firmware's inbound
+            # line buffer on a 2 KB device.
+            command_max_serial_bytes=_integer(
+                values, "TB_COMMAND_MAX_SERIAL_BYTES", 120, minimum=64
+            ),
+            command_journal_retention_seconds=_number(
+                values, "TB_COMMAND_JOURNAL_RETENTION_SECONDS", 86_400.0, minimum=60.0
             ),
         )
