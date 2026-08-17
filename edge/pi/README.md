@@ -374,3 +374,27 @@ python -m terrabyte_edge wizard --windowed
 cd edge/pi
 python -m unittest discover -s tests -v
 ```
+
+### 소프트웨어 아두이노 (`terrabyte_edge/loopback.py`)
+
+실물 펌프·릴레이·펌웨어 없이 명령 계약의 시리얼 쪽을 말합니다. `{"t":"cmd"}`를
+받아 `{"t":"ack"}`를 돌려주므로 백엔드 → MQTT → 파이 → 시리얼 → ack → MQTT →
+백엔드 **전 구간을 물 없이** 돌릴 수 있습니다.
+
+```python
+from terrabyte_edge.loopback import LoopbackArduino
+from terrabyte_edge.serial_reader import SerialLineReader
+
+arduino = LoopbackArduino(node_id="terrabyte-node-01")
+reader = SerialLineReader(..., factory=arduino.as_factory())
+```
+
+**환경변수나 CLI 플래그로 켜는 스위치는 의도적으로 없습니다.** 루프백으로 설정될
+수 있는 게이트웨이는 오타 하나에 **측정값과 구분되지 않는 가짜 센서값을 발행**하게
+됩니다. 코드에서 명시적으로 조립할 때만 쓰입니다.
+
+모델링하는 것: `accepted` → `completed` 2단(중간 상태가 실제로 관측되게), 명령 ID
+링버퍼 8개(QoS1 중복이 두 홉 모두에 있으므로 필수), G1 절대 최대 구동시간 클램프
+(`stop:"max_runtime"`). 그 외 쿨다운 타이밍·워치독 발동은 `respond` 훅으로
+주입합니다 — 인터록을 여기서 두 번째로 구현하면 펌웨어와 어긋나고, **펌웨어와
+불일치하는 테스트 더블은 없는 것보다 나쁩니다.**
