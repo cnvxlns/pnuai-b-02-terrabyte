@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import logging
 from threading import Event, Thread
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .backend import HttpPublisher
 from .config import Settings
@@ -28,6 +29,10 @@ from .state import GatewayState, write_snapshot
 
 
 LOGGER = logging.getLogger(__name__)
+
+# (port, raw line, decoded envelope). The raw line is kept in the signature
+# because a family's validator may want to decide from the bytes alone.
+SerialRoute = Callable[[str, bytes, dict], None]
 
 
 def _build_publisher(settings: Settings) -> Publisher:
@@ -91,6 +96,34 @@ class BridgeService:
         # Ingest threads are tracked separately from the uploader: one dead
         # port must not take the gateway down while three pots keep reporting.
         self._critical_threads: list[Thread] = []
+        # Envelope discriminator -> handler. See _ingest_line for why this is a
+        # table. Bound methods, so it is built per instance rather than on the
+        # class.
+        self._serial_routes: dict[str, SerialRoute] = {
+            "message_type": self._ingest_telemetry,
+            "t": self._ingest_short_key_frame,
+        }
+
+    def _critical_workers(self) -> list[tuple[str, Callable[[], None]]]:
+        """Workers whose death means the gateway is not doing its job.
+
+        ``(name, target)`` pairs rather than constructed Threads so adding a
+        worker — the command relay, the deadman tick — is one line here and
+        nothing in start(). Every entry is fatal by construction: if a worker
+        belongs in this list it must not be one whose exit the gateway can
+        survive (that is what the ingest threads are, and they are built
+        separately below).
+        """
+
+        return [
+            ("backend-upload", self._upload_loop),
+            # The snapshot writer is its own thread rather than a tick inside
+            # the uploader. The uploader blocks for up to the publish timeout on
+            # a dead broker, which is exactly the moment somebody walks over and
+            # plugs a monitor in; a frozen display then would hide the one fact
+            # they need.
+            ("status-snapshot", self._snapshot_loop),
+        ]
 
     def start(self) -> None:
         self.outbox.initialize()
@@ -98,13 +131,10 @@ class BridgeService:
         LOGGER.info("outbox ready pending=%d dead=%d", pending, dead)
         self.state.record_outbox(pending=pending, dead=dead)
 
-        uploader = Thread(target=self._upload_loop, name="backend-upload", daemon=True)
-        # The snapshot writer is its own thread rather than a tick inside the
-        # uploader. The uploader blocks for up to the publish timeout on a dead
-        # broker, which is exactly the moment somebody walks over and plugs a
-        # monitor in; a frozen display then would hide the one fact they need.
-        snapshotter = Thread(target=self._snapshot_loop, name="status-snapshot", daemon=True)
-        self._critical_threads = [uploader, snapshotter]
+        self._critical_threads = [
+            Thread(target=target, name=name, daemon=True)
+            for name, target in self._critical_workers()
+        ]
 
         ingest_threads = [
             Thread(
@@ -206,6 +236,67 @@ class BridgeService:
             self.state.record_link(reader.port, up=False)
 
     def _ingest_line(self, port: str, line: bytes) -> None:
+        """Route one serial line to the handler for its envelope.
+
+        The link is asymmetric and that is the trap. Telemetry arrives as
+        ``{"message_type": "telemetry", ...}`` with long keys; command acks
+        arrive as ``{"t": "ack", ...}`` with short ones, because the ATmega328P
+        has 2 KB of SRAM and cannot afford the long spelling
+        (docs/design/edge_ai_hardening.md §serial contract). A reader that looks
+        at only one of the two discriminators drops the other family while
+        reporting a validation error about the family it does know — which reads
+        like a firmware bug rather than a missing route.
+
+        A table rather than an if-chain so a new family is one entry. Both keys
+        present resolves to telemetry: insertion order puts it first, and it is
+        the family with the strict validator.
+        """
+
+        try:
+            message = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            LOGGER.warning("discarding non-JSON serial line port=%s", port)
+            self.state.record_error(port)
+            return
+        if not isinstance(message, dict):
+            LOGGER.warning("discarding non-object serial line port=%s", port)
+            self.state.record_error(port)
+            return
+
+        for key, handler in self._serial_routes.items():
+            if key in message:
+                handler(port, line, message)
+                return
+        LOGGER.warning(
+            "discarding serial line with no known envelope key port=%s keys=%s",
+            port,
+            ",".join(sorted(message)[:5]),
+        )
+        self.state.record_error(port)
+
+    def _ingest_short_key_frame(
+        self, port: str, line: bytes, message: dict[str, object]
+    ) -> None:
+        """Placeholder route for the short-key family (``{"t": ...}``).
+
+        Live rather than commented out on purpose: an ack that arrives before
+        its handler exists must say so plainly instead of being misreported as
+        malformed telemetry. S-B replaces this body; the routing above does not
+        change.
+        """
+
+        LOGGER.warning(
+            "short-key serial frame has no handler yet port=%s t=%s",
+            port,
+            message.get("t"),
+        )
+
+    def _ingest_telemetry(
+        self, port: str, line: bytes, message: dict[str, object]
+    ) -> None:
+        # ``line`` rather than ``message``: parse_line answers "is this line a
+        # valid telemetry message?" from the bytes alone, and keeping that true
+        # is worth one redundant decode per second.
         try:
             event = parse_line(
                 line,

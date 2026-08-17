@@ -215,6 +215,86 @@ class MultiNodeIngestTests(unittest.TestCase):
         service._critical_threads = [SimpleNamespace(is_alive=lambda: False)]
         self.assertTrue(service.worker_failed())
 
+    def test_every_critical_worker_is_named_and_callable(self) -> None:
+        """start() builds threads from this table, so a bad entry fails at boot.
+
+        Naming matters beyond tidiness: join() logs the name of a worker that
+        would not stop, and an unnamed thread makes that log useless.
+        """
+
+        service = self.build([])
+        workers = service._critical_workers()
+        self.assertEqual(
+            [name for name, _ in workers], ["backend-upload", "status-snapshot"]
+        )
+        for name, target in workers:
+            with self.subTest(worker=name):
+                self.assertTrue(callable(target))
+
+
+class SerialRoutingTests(unittest.TestCase):
+    """The link carries two envelopes: long-key telemetry and short-key acks.
+
+    Routing on the discriminator rather than assuming telemetry means a frame
+    from the other family reports what it actually is instead of failing
+    telemetry validation and looking like a firmware fault.
+    """
+
+    def setUp(self) -> None:
+        self.port = "/dev/ttyUSB0"
+        self.outbox = FakeOutbox()
+        config = settings([self.port], ["terrabyte-node-01"], Path("/tmp/unused.json"))
+        self.service = BridgeService(
+            config,
+            outbox=self.outbox,
+            publisher=SimpleNamespace(close=lambda: None),
+            serial_readers=[],
+            state=GatewayState(
+                gateway_id=config.device_id,
+                claim_code=config.claim_code,
+                transport=config.transport,
+                ports=(self.port,),
+                clock=lambda: 1000.0,
+            ),
+        )
+
+    def port_snapshot(self):
+        return next(
+            p for p in self.service.state.snapshot().ports if p.path == self.port
+        )
+
+    def test_telemetry_still_routes_to_the_validator(self) -> None:
+        self.service._ingest_line(self.port, telemetry("terrabyte-node-01"))
+        self.assertEqual(len(self.outbox.events), 1)
+
+    def test_a_short_key_frame_reaches_its_own_route(self) -> None:
+        seen = []
+        self.service._serial_routes["t"] = lambda port, line, message: seen.append(
+            (port, message["t"])
+        )
+        self.service._ingest_line(self.port, b'{"t":"ack","id":"c-1","ph":"ok"}\n')
+
+        self.assertEqual(seen, [(self.port, "ack")])
+        # Not counted as a protocol error: it is a valid frame of another family.
+        self.assertEqual(self.port_snapshot().errors, 0)
+
+    def test_adding_a_family_is_one_table_entry(self) -> None:
+        """The property that makes the ack path an addition and not a rewrite."""
+
+        self.service._serial_routes["v3"] = lambda port, line, message: None
+        self.service._ingest_line(self.port, b'{"v3":1}\n')
+        self.assertEqual(self.port_snapshot().errors, 0)
+
+    def test_an_unroutable_frame_is_counted_as_an_error(self) -> None:
+        self.service._ingest_line(self.port, b'{"nonsense":1}\n')
+        self.assertEqual(self.port_snapshot().errors, 1)
+
+    def test_non_json_and_non_object_lines_are_counted_as_errors(self) -> None:
+        self.service._ingest_line(self.port, b"not json at all\n")
+        self.service._ingest_line(self.port, b"[1,2,3]\n")
+        self.assertEqual(self.port_snapshot().errors, 2)
+        self.assertEqual(self.outbox.events, [])
+
 
 if __name__ == "__main__":
     unittest.main()
