@@ -33,7 +33,8 @@
 ```text
 tb/v2/{gatewayId}/up/telemetry    게이트웨이 → 서버   QoS 1, retain 안 함
 tb/v2/{gatewayId}/up/status       온라인 상태, LWT     QoS 1, retain
-tb/v2/{gatewayId}/dn/command      서버 → 게이트웨이     QoS 1
+tb/v2/{gatewayId}/up/ack          명령 수명주기 전체   QoS 1, retain 안 함
+tb/v2/{gatewayId}/dn/command      서버 → 게이트웨이     QoS 1, retain 안 함
 ```
 
 **인증은 브로커가 담당합니다.** 각 게이트웨이 계정은 자기 `gatewayId` 아래에만
@@ -55,6 +56,92 @@ MQTT v5를 씁니다. 3.1.1에서는 브로커가 ACL로 막은 발행에도 PUB
 때문에, 게이트웨이가 자기 네임스페이스 밖으로 발행하도록 잘못 설정되면 성공으로
 보고되고 outbox에서 지워져 데이터가 조용히 사라집니다. v5의 PUBACK reason code로
 이를 감지해 재시도로 처리합니다.
+
+### 관수 명령 중계 (`dn/command` → serial → `up/ack`)
+
+게이트웨이는 **동결된 두 계약 사이의 번역기**입니다. 계약 원본은
+[`docs/design/edge_ai_hardening.md`](../../docs/design/edge_ai_hardening.md)
+개선 2·3이며, 구현은 `terrabyte_edge/command_relay.py`입니다.
+
+```text
+백엔드 ──dn/command (긴 키)──▶ 파이 ──{"t":"cmd"} (짧은 키)──▶ 아두이노
+       ◀──up/ack (긴 키)────       ◀──{"t":"ack"}───────────
+```
+
+```json
+{"schema_version":2,"message_type":"command","command_id":"01J8F3…","node_id":"terrabyte-node-01","pot_id":42,"actuator":"pump","action":"dose","params":{"volume_ml":120,"max_runtime_ms":18000},"expires_at":"2026-08-04T10:02:00Z"}
+{"t":"cmd","id":"01J8F3…","act":"pump","ms":18000,"ml":120}
+```
+
+`max_runtime_ms` ↔ `ms` 개명에 주의하십시오. 짧은 키는 ATmega328P의 SRAM이
+2KB이기 때문입니다.
+
+**TTL은 파이만 판정합니다.** Spring은 발행 전에 거르고, 아두이노는 RTC가 없어
+벽시계 비교 자체가 불가능하며 상대 시간 `ms`만 다룹니다(D19). 즉 동기화된 시계와
+명령을 동시에 가진 계층은 파이뿐입니다. 만료된 명령은 **시리얼로 나가지 않고**
+`phase:"rejected", reason:"EXPIRED"`로 응답합니다 — 2시간 오프라인 후 재접속해
+큐잉된 6건을 한꺼번에 받아도 관수 횟수는 정확히 0이 됩니다(F3 지연폭탄).
+
+**명령은 절대 retain하지 않습니다.** 구독 측에서도 마찬가지입니다: retain된
+명령을 받으면 실행하지 않고 폐기하고 ERROR를 남깁니다. 재접속마다 오래된 관수가
+재실행되는 경로이기 때문입니다.
+
+`ms`는 **클램프하지 않고 그대로** 내려보냅니다. 파이가 30초로 깎으면 펌웨어가
+`stop:"volume_reached"`로 답해 **절반만 나간 관수가 완주로 기록**됩니다. 원래
+값을 보내야 펌웨어가 `stop:"max_runtime"`과 실제 구동시간으로 답합니다.
+
+**데드맨 틱** — 구동 중 1초 주기로 `{"t":"ka"}`를 보냅니다. 3초 무수신 시 즉시
+정지하는 펌웨어 G3의 송신 측입니다. `dn/heartbeat`(30초 QoS0, Spring 생존 신호)와
+**다른 것**입니다. 주기가 30배 다릅니다.
+
+**중복 방지는 SQLite에 남깁니다.** QoS1 중복이 두 홉 모두에 있고, 펌웨어
+링버퍼는 8개까지만 기억하며, 재시작하면 메모리 집합은 사라집니다. 같은 outbox
+DB의 `command_journal` 테이블이 이 창을 프로세스 수명보다 길게 유지합니다.
+
+#### `reason` 3중 어휘
+
+같은 이름이 계층마다 다른 개념입니다. `phase`(4값)가 상태를 정하고 `reason`은
+거친 진단이며, **펌웨어의 원문 토큰은 `stop_cause`에 그대로 보존**됩니다.
+
+| 아두이노 | MQTT `reason` | 비고 |
+|---|---|---|
+| `cooldown` | `INTERLOCK_COOLDOWN` | Java `DenyReason.COOLDOWN`과 **다름**(전자는 발행 전 서버 게이트 6시간, 후자는 발행 후 펌웨어 10분) |
+| `busy` | `INTERLOCK_COOLDOWN` | 8개 어휘에 대응값이 없는 펌웨어 로컬 토큰. `NODE_OFFLINE`으로 뭉개지 않습니다 — 노드는 실제로 응답했습니다. 구분은 `stop_cause="busy"`가 보존 |
+| `duplicate` | `DUPLICATE` | |
+| `watchdog` | `WATCHDOG` | |
+| `max_runtime` | `OK` | G1이 제대로 동작한 것이므로 실패가 아닙니다 |
+| `volume_reached` | `OK` | |
+| (미등록 토큰) | phase별 폴백 + WARN | 없던 사건을 발명하지 않는 방향으로만 |
+
+파이가 자체 거절할 때는 `stop_cause`에 `pi_` 접두사를 붙여 아두이노가 관여하지
+않았음을 로그에서 바로 구분할 수 있게 합니다: `pi_expired`, `pi_duplicate`,
+`pi_link_down`, `pi_unknown_node`, `pi_ambiguous_node`, `pi_bad_actuator`,
+`pi_bad_params`, `pi_bad_schema`, `pi_frame_too_long`, `pi_no_expires_at`.
+
+`estimated_ml`은 펌웨어가 `ml`을 실측해 보내면 그 값을, 아니면 실제 구동시간
+대비로 환산한 값을 **올림**해서 씁니다. 과다 보고는 다음 관수를 조금 미루는
+정도이지만, 과소 보고는 일일 예산이 못 본 물이 화분에 들어간다는 뜻입니다.
+
+#### 스레드 모델
+
+`mqtt_publisher.py`가 `loop_start()`를 쓰므로 `on_message`는 **paho 네트워크
+스레드**에서 실행됩니다. 거기서 TTL 판정·시리얼 write·ack 대기를 하면 MQTT
+keepalive를 굶기고 데드락이 가능합니다. **인라인으로 쓰면 단위 테스트는 통과하고
+실기에서 죽습니다** — 테스트는 핸들러를 테스트 자기 스레드에서 부르기 때문입니다.
+
+| 스레드 | 하는 일 |
+|---|---|
+| paho 네트워크 | `offer()` — 큐에 넣고 즉시 반환 |
+| `command-relay` | 파싱 → TTL → 중복 판정 → 시리얼 write |
+| `serial-ingest-N` | ack 파싱·번역 → outbox에 적재 |
+| `command-deadman` | 구동 중 `{"t":"ka"}` |
+| `ack-upload` | outbox의 `ack` kind만 별도 배출 |
+
+ack가 텔레메트리와 **별도 스레드**인 이유는 outbox의 head-of-line blocking이
+kind별이기 때문입니다. 스레드를 공유하면 백오프 중인 측정값 배치가 발행 타임아웃
+동안 스레드를 잡고 있고, 그만큼 늦어진 ack는 서버가 이미 EXPIRED로 처리해
+`granted_ml`을 예산에서 그대로 빼버립니다 — 가지 않은 물이 차감되는 **팬텀 예산
+차감**입니다.
 
 ### HTTP 폴백
 
@@ -131,6 +218,14 @@ pending/dead row 수를 경보로 연결해야 합니다.
 운영에서는 HTTPS가 기본이며 개발용 HTTP는 `TB_ALLOW_INSECURE_HTTP=true`를
 명시해야만 허용됩니다. Orange Pi 시각이 `TB_CLOCK_MINIMUM_UTC`보다 이르면 NTP가
 동기화되지 않은 것으로 보고 관측을 폐기합니다.
+
+명령 중계 설정(`TB_COMMAND_*`)은 전부 선택이며 기본값으로 동작합니다. 중계는
+MQTT 전송에서 **기본 켜짐**입니다 — 명령 경로의 안전 게이트는 백엔드의 MQTT
+디스패처(기본 비활성)이고, 상류에서 아무것도 발행하지 않으면 이 게이트웨이는
+명령을 받을 일이 없습니다. 스위치 하나가 한 곳에 있는 편이 서로 어긋날 수 있는
+두 곳보다 낫습니다. `TB_COMMAND_DEADMAN_INTERVAL_SECONDS`는 펌웨어 G3(3초)보다
+반드시 짧아야 하므로 2초를 넘기면 시작을 거부합니다. 값과 근거는
+[`deploy/terrabyte-edge.env.example`](deploy/terrabyte-edge.env.example) 참고.
 
 ## 관수 판정 (`terrabyte_edge/irrigation`)
 
