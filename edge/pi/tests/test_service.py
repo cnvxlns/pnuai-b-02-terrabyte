@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 import unittest
 
-from terrabyte_edge.outbox import OutboxItem
+from terrabyte_edge.outbox import KIND_TELEMETRY, OutboxItem
 from terrabyte_edge.protocol import Event
 from terrabyte_edge.publisher import Delivery, DeliveryResult
 from terrabyte_edge.service import BridgeService
@@ -37,8 +37,10 @@ class FakeOutbox:
         ]
         self.retried: list[str] = []
         self.delivered: list[str] = []
+        self.due_kinds: list[str] = []
 
-    def due(self, _limit: int) -> list[OutboxItem]:
+    def due(self, _limit: int, *, kind: str = KIND_TELEMETRY) -> list[OutboxItem]:
+        self.due_kinds.append(kind)
         return self.items
 
     def mark_retry(
@@ -93,6 +95,10 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(publisher.sent, ["oldest"])
         self.assertEqual(outbox.retried, ["oldest"])
         self.assertEqual(outbox.delivered, [])
+        # The block above is scoped to telemetry. An ack must not be stuck
+        # behind a backed-off observation, so this worker never asks for a
+        # mixed batch.
+        self.assertEqual(outbox.due_kinds, [KIND_TELEMETRY])
 
     def test_join_closes_the_publisher(self) -> None:
         outbox = FakeOutbox()

@@ -11,7 +11,7 @@ from .backend import HttpPublisher
 from .config import Settings
 from .irrigation.volume import MODEL_VERSION, suggest_volume_ml
 from .mqtt_publisher import MqttPublisher
-from .outbox import Outbox, OutboxFullError
+from .outbox import KIND_TELEMETRY, Outbox, OutboxFullError
 from .protocol import (
     # Aliased because ``Event`` already means threading's here, and renaming
     # that would touch every worker loop.
@@ -268,8 +268,18 @@ class BridgeService:
             if uploaded == 0:
                 self.stop_event.wait(self.settings.upload_interval_seconds)
 
-    def _upload_once(self) -> int:
-        items = self.outbox.due(self.settings.upload_batch_size)
+    def _upload_once(self, kind: str = KIND_TELEMETRY) -> int:
+        """Drain one batch of one kind.
+
+        Scoped to a kind rather than to the whole table because the ``break``
+        below is the head-of-line block that keeps observations in capture
+        order, and that block must not reach across kinds. A second worker
+        draining ``KIND_ACK`` — which needs its own publish path, not this
+        telemetry one — is S-B's to add; the queue and this signature are
+        already shaped for it.
+        """
+
+        items = self.outbox.due(self.settings.upload_batch_size, kind=kind)
         processed = 0
         for item in items:
             if self.stop_event.is_set():
