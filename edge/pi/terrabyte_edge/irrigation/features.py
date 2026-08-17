@@ -19,13 +19,20 @@ FEATURE_NAMES = (
     "hours_since_last_irrigation",
 )
 
+# Public because the caller has to clamp to it. The irrigation history reports a
+# true elapsed time and a pot left alone for two months legitimately exceeds any
+# range the model was trained on; the feature vector must be clamped to what the
+# trees have seen rather than raising, since "even longer than the longest gap in
+# training" and "the longest gap in training" are the same decision.
+MAX_HOURS_SINCE_LAST_IRRIGATION = 720.0
+
 _RANGES = {
     "soil_moisture_pct": (0.0, 100.0),
     "soil_temperature_c": (-20.0, 70.0),
     "air_temperature_c": (-50.0, 80.0),
     "relative_humidity_pct": (0.0, 100.0),
     "ppfd_umol_m2_s": (0.0, 5000.0),
-    "hours_since_last_irrigation": (0.0, 720.0),
+    "hours_since_last_irrigation": (0.0, MAX_HOURS_SINCE_LAST_IRRIGATION),
 }
 
 

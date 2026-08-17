@@ -13,7 +13,13 @@ from .decision import (
     daily_budget_ml_for,
     reference_dose_ml,
 )
-from .features import FEATURE_NAMES, INPUT_SCHEMA_VERSION, FeatureError, IrrigationFeatures
+from .features import (
+    FEATURE_NAMES,
+    INPUT_SCHEMA_VERSION,
+    MAX_HOURS_SINCE_LAST_IRRIGATION,
+    FeatureError,
+    IrrigationFeatures,
+)
 from .forest import ModelError, RandomForestClassifier, RandomForestVote
 from .volume import MODEL_VERSION, SUPPORTED_CROP_CODES, suggest_volume_ml
 
@@ -22,6 +28,7 @@ __all__ = [
     "FIXED_VOLUME_ML",
     "INPUT_SCHEMA_VERSION",
     "LARGE_POT_DOSE_ML",
+    "MAX_HOURS_SINCE_LAST_IRRIGATION",
     "MODEL_VERSION",
     "REFERENCE_DOSE_ML",
     "SERVER_DAILY_BUDGET_ML",
