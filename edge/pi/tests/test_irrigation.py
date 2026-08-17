@@ -14,6 +14,8 @@ from terrabyte_edge.irrigation import (
     ModelError,
     RandomForestClassifier,
     Verdict,
+    VolumeSource,
+    suggest_volume_ml,
 )
 from terrabyte_edge.irrigation.forest import DEFAULT_MODEL_PATH
 
@@ -122,6 +124,7 @@ class EnvelopeTests(unittest.TestCase):
         self.assertTrue(decision.irrigate)
         self.assertEqual(decision.volume_ml, FIXED_VOLUME_ML)
         self.assertEqual(decision.volume_ml, 30.0)
+        self.assertEqual(decision.volume_source, VolumeSource.FALLBACK)
 
     def test_model_cannot_widen_the_autonomous_envelope(self) -> None:
         """`D17`: a model that recommends irrigation at 30% soil moisture is
@@ -278,6 +281,111 @@ class ArtifactValidationTests(unittest.TestCase):
         payload["trees"][0]["children_left"][0] = 0
         with self.assertRaises(ModelError):
             RandomForestClassifier.from_dict(payload)
+
+
+class InjectedVolumeTests(unittest.TestCase):
+    """The seam between "whether" (this module) and "how much" (volume.py).
+
+    The two were written on branches that did not know about each other:
+    decision.py declared the dose fixed at 30 mL while volume.py computed a
+    variable one. Integration forces the join, and it lands here rather than in
+    the constructor because the dose belongs to the reading.
+    """
+
+    def test_a_computed_dose_is_used_and_labelled(self) -> None:
+        decision = IrrigationDecider(_StubModel(irrigate=True)).decide(
+            features(), volume_ml=88.0
+        )
+        self.assertTrue(decision.irrigate)
+        self.assertEqual(decision.volume_ml, 88.0)
+        self.assertEqual(decision.volume_source, VolumeSource.COMPUTED)
+
+    def test_an_unsizable_reading_falls_back_rather_than_refusing(self) -> None:
+        """A plant dying of an unset TB_POT_SUBSTRATE_ML is the worse failure.
+
+        The fallback is the smallest dose in play, so erring here errs dry.
+        """
+
+        decision = IrrigationDecider(_StubModel(irrigate=True)).decide(
+            features(), volume_ml=None
+        )
+        self.assertEqual(decision.volume_ml, FIXED_VOLUME_ML)
+        self.assertEqual(decision.volume_source, VolumeSource.FALLBACK)
+
+    def test_zero_is_a_real_answer_and_is_not_a_dose(self) -> None:
+        """suggest_volume_ml returns 0 for "needs nothing"; None for "cannot
+        tell". Silently treating 0 as the fallback would water a pot the formula
+        said was already wet enough."""
+
+        with self.assertRaises(ValueError):
+            IrrigationDecider(_StubModel(irrigate=True)).decide(
+                features(), volume_ml=0.0
+            )
+
+    def test_the_budget_weighs_the_dose_actually_about_to_be_delivered(self) -> None:
+        """The whole reason the injection is at decide() and not __init__."""
+
+        decider = IrrigationDecider(_StubModel(irrigate=True))
+        self.assertTrue(decider.decide(features(), volume_ml=40.0).irrigate)
+        blocked = decider.decide(
+            features(), volume_ml=40.0, dispensed_today_ml=90.0
+        )
+        self.assertEqual(blocked.verdict, Verdict.DAILY_BUDGET_EXHAUSTED)
+        # The dose is reported as zero, but its provenance survives the veto.
+        self.assertEqual(blocked.volume_ml, 0.0)
+        self.assertEqual(blocked.volume_source, VolumeSource.COMPUTED)
+
+    def test_a_dose_larger_than_the_whole_budget_is_its_own_verdict(self) -> None:
+        """Otherwise the pot is never watered and the log blames the budget.
+
+        EnvelopeLimits.daily_budget_ml is 120, which the server's own fallback
+        table exceeds for a pot over 6 L (160 mL). That deployment must be
+        distinguishable from "today's allowance is used up".
+        """
+
+        decision = IrrigationDecider(_StubModel(irrigate=True)).decide(
+            features(), volume_ml=160.0, dispensed_today_ml=0.0
+        )
+        self.assertEqual(decision.verdict, Verdict.DOSE_EXCEEDS_DAILY_BUDGET)
+        self.assertNotEqual(decision.verdict, Verdict.DAILY_BUDGET_EXHAUSTED)
+        self.assertFalse(decision.envelope_allows)
+
+    def test_the_default_budget_is_four_fixed_doses_and_the_interval_caps_four(
+        self,
+    ) -> None:
+        """Why the budget never fired before: it restated min_interval_hours.
+
+        Four 6-hour intervals fit in a day and four 30 mL doses fit in 120 mL, so
+        the budget could not bind before the interval did. A computed dose breaks
+        that coincidence, which is the whole reason the constant needs revisiting
+        against pot volume.
+        """
+
+        limits = EnvelopeLimits.supervised()
+        self.assertEqual(limits.daily_budget_ml / FIXED_VOLUME_ML, 4.0)
+        self.assertEqual(24.0 / limits.min_interval_hours, 4.0)
+
+    def test_the_formula_and_the_decider_join_up(self) -> None:
+        """One pass of the real seam, with no stub between them."""
+
+        dose = suggest_volume_ml(
+            soil_moisture_pct=11.0,
+            air_temperature_c=28.0,
+            air_humidity_pct=30.0,
+            ppfd_umol_m2_s=600.0,
+            soil_temperature_c=21.0,
+            hours_since_last_irrigation=30.0,
+            substrate_volume_ml=1000.0,
+            crop_code="lettuce",
+        )
+        self.assertIsNotNone(dose)
+        decision = IrrigationDecider(
+            _StubModel(irrigate=True),
+            limits=EnvelopeLimits(daily_budget_ml=1000.0),
+        ).decide(features(), volume_ml=float(dose))
+        self.assertTrue(decision.irrigate)
+        self.assertEqual(decision.volume_ml, float(dose))
+        self.assertEqual(decision.volume_source, VolumeSource.COMPUTED)
 
 
 if __name__ == "__main__":
