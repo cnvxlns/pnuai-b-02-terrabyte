@@ -4,6 +4,14 @@ Operational transport per design doc §6.3/§6.5/§8.1: publishes to
 ``{prefix}/{gateway_id}/up/telemetry`` and announces presence on
 ``{prefix}/{gateway_id}/up/status`` via a Last Will (offline) plus a retained
 "online" publish on connect.
+
+It also carries the command downlink: it subscribes to
+``{prefix}/{gateway_id}/dn/command`` and publishes outcomes to
+``{prefix}/{gateway_id}/up/ack``. This class deliberately does no command
+*decisions* — no TTL, no interlocks, no serial writes. It hands the raw bytes to
+a handler and returns, because ``on_message`` runs on paho's network thread and
+anything slow there starves the MQTT keepalive. The judging lives in
+``command_relay.py``, on its own thread.
 """
 
 from __future__ import annotations
@@ -13,8 +21,8 @@ import logging
 import threading
 from typing import Any, Callable
 
-from .protocol import Event
-from .publisher import Delivery, DeliveryResult
+from .protocol import CommandAck, Event
+from .publisher import CommandHandler, Delivery, DeliveryResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,10 +76,14 @@ class MqttPublisher:
         self._gateway_id = gateway_id
         self._telemetry_topic = f"{topic_prefix}/{gateway_id}/up/telemetry"
         self._status_topic = f"{topic_prefix}/{gateway_id}/up/status"
+        self._ack_topic = f"{topic_prefix}/{gateway_id}/up/ack"
+        self._command_topic = f"{topic_prefix}/{gateway_id}/dn/command"
         self._publish_timeout_seconds = publish_timeout_seconds
         self._connected = threading.Event()
         self._publish_reasons: dict[int, Any] = {}
         self._publish_lock = threading.Lock()
+        self._command_handler: CommandHandler | None = None
+        self._command_lock = threading.Lock()
 
         # MQTT v5, not 3.1.1, for one specific reason: a broker that refuses a
         # publish on ACL grounds still returns a PUBACK under 3.1.1, so a
@@ -95,6 +107,7 @@ class MqttPublisher:
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_publish = self._on_publish
+        self._client.on_message = self._on_message
         if username:
             self._client.username_pw_set(username, password)
         if tls:
@@ -151,13 +164,86 @@ class MqttPublisher:
         # would re-execute stale irrigation on every reconnect. Only this
         # up/status publish is retained.
         client.publish(self._status_topic, ONLINE_PAYLOAD, qos=1, retain=True)
+        # Subscriptions do not survive a reconnect, so they are (re)issued here
+        # rather than once at start-up. Without this the gateway keeps publishing
+        # telemetry after a broker blip and silently stops receiving commands —
+        # the failure looks like "the backend never dispatched", which sends
+        # whoever is debugging to the wrong codebase.
+        with self._command_lock:
+            handler = self._command_handler
+        if handler is not None:
+            client.subscribe(self._command_topic, qos=1)
+            LOGGER.info("subscribed to commands topic=%s", self._command_topic)
         self._connected.set()
+
+    def subscribe_commands(self, handler: CommandHandler) -> None:
+        """Route ``dn/command`` payloads to ``handler``.
+
+        Idempotent and safe to call before the first CONNACK: the handler is
+        stored and ``_on_connect`` issues the SUBSCRIBE. If the session is
+        already up (a fast broker can CONNACK before the caller gets here) the
+        SUBSCRIBE is issued immediately, so neither ordering loses the
+        subscription.
+        """
+
+        with self._command_lock:
+            self._command_handler = handler
+        is_connected = getattr(self._client, "is_connected", None)
+        if callable(is_connected) and is_connected():
+            self._client.subscribe(self._command_topic, qos=1)
+            LOGGER.info("subscribed to commands topic=%s", self._command_topic)
+
+    def _on_message(self, client, userdata, message) -> None:
+        """Runs on paho's network thread. Hand off and return, nothing else.
+
+        Everything about judging a command is slow relative to a keepalive: a
+        wall-clock TTL check, a SQLite dedup claim, a serial write that can block
+        on a flush, and then a wait for the firmware's ack. Doing any of that
+        here starves the MQTT keepalive and can deadlock the client outright,
+        and the failure does not reproduce under unit tests — those call the
+        handler directly, on the test's own thread. So this method only ever
+        enqueues.
+        """
+
+        with self._command_lock:
+            handler = self._command_handler
+        if handler is None:
+            return
+        try:
+            handler(bytes(message.payload or b""), bool(getattr(message, "retain", False)))
+        except Exception:  # a handler fault must not kill paho's loop thread
+            LOGGER.exception("command handler raised; dropping message")
 
     def send(self, event: Event) -> DeliveryResult:
         try:
             body = event.envelope_v2(gateway_id=self._gateway_id)
         except Exception as exc:  # local schema-validation failure only
             return DeliveryResult(Delivery.DEAD, f"invalid_envelope:{exc}")
+        return self._publish(self._telemetry_topic, body)
+
+    def send_ack(self, ack: CommandAck) -> DeliveryResult:
+        """Publish one command outcome. Never retained.
+
+        Same QoS and same never-retain rule as telemetry. An ack is a statement
+        about one moment in one command's life; retained, it would be replayed to
+        the backend on every reconnect as if the pump had just stopped again.
+        """
+
+        try:
+            body = ack.ack_payload(gateway_id=self._gateway_id)
+        except Exception as exc:  # local schema-validation failure only
+            return DeliveryResult(Delivery.DEAD, f"invalid_envelope:{exc}")
+        return self._publish(self._ack_topic, body)
+
+    def _publish(self, topic: str, body: dict[str, object]) -> DeliveryResult:
+        """One QoS 1, never-retained publish, judged by its PUBACK.
+
+        Shared by telemetry and acks so the four ways a publish can fail —
+        disconnected session, non-zero rc, missing PUBACK, v5 refusal — are
+        classified in exactly one place. The ack path is the one that must not
+        drift: a misclassified ack becomes a phantom budget deduction, whereas a
+        misclassified reading is merely a lost sample.
+        """
 
         payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
 
@@ -170,9 +256,7 @@ class MqttPublisher:
             return DeliveryResult(Delivery.RETRY, "not_connected")
 
         try:
-            info = self._client.publish(
-                self._telemetry_topic, payload, qos=1, retain=False
-            )
+            info = self._client.publish(topic, payload, qos=1, retain=False)
         except Exception as exc:  # broker/socket errors, however paho raises them
             return DeliveryResult(Delivery.RETRY, type(exc).__name__)
 
@@ -197,7 +281,7 @@ class MqttPublisher:
             # that were never actually invalid. If it stays broken the outbox
             # fills and logs CRITICAL — loud, but not silent data loss.
             LOGGER.error(
-                "broker rejected publish topic=%s reason=%s", self._telemetry_topic, rejection
+                "broker rejected publish topic=%s reason=%s", topic, rejection
             )
             return DeliveryResult(Delivery.RETRY, f"rejected:{rejection}")
         return DeliveryResult(Delivery.DELIVERED, "puback")
