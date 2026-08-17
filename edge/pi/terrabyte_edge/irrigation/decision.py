@@ -79,9 +79,15 @@ def reference_dose_ml(substrate_volume_ml: float | None) -> float:
 
     ``None`` — no configured pot volume — returns :data:`FIXED_VOLUME_ML`, which
     is what the decider will actually deliver in that case: with no volume the
-    water balance cannot size a dose and the fallback stands in. Deriving the
-    budget from the same number keeps the two consistent, and keeps the
-    unconfigured deployment at exactly the budget it has today.
+    water balance cannot size a dose and the fallback stands in, so the budget is
+    derived from the dose that will really go out rather than from a pot size
+    nobody stated.
+
+    An unconfigured pot ends up on the derivation's floor, so its budget is again
+    loose enough that the interval gate is the binding one. That is honest: with no
+    volume there is nothing to derive a volume limit from, and the interval is the
+    limit that remains. It is also not the pot the server thinks it is watering,
+    which is what ``volume_source`` on every decision is for.
     """
 
     if substrate_volume_ml is None:
