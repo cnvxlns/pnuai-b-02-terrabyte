@@ -67,7 +67,7 @@ class IrrigationGovernorTests {
         return new TelemetrySample(
                 POT_ID, 1L, "node-1", "lettuce", "orangepi-pro-01", "evt-1",
                 observedAt, 1L, moisture, 0L, 24.0, 55.0, 300.0, 21.0,
-                valid, true, true);
+                valid, true, true, null);
     }
 
     private static IrrigationRequest request(int ml) {

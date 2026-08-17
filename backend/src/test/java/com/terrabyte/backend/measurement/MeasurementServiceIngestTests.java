@@ -100,6 +100,7 @@ class MeasurementServiceIngestTests {
                         nodeId,
                         1,
                         new TelemetryEnvelope.Measurements(27.0, 58.0, 230.0, null, null, null),
-                        new TelemetryEnvelope.Quality(true, true, null))));
+                        new TelemetryEnvelope.Quality(true, true, null),
+                        null)));
     }
 }

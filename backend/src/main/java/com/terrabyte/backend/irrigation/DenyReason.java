@@ -22,6 +22,11 @@ public enum DenyReason {
     /**
      * The requested volume was not a usable number.
      *
+     * <p>The {@code AI_} prefix is historical — it predates the removal of the
+     * model server, and the name is persisted in {@code irrigation_decision}, so
+     * renaming it would rewrite stored history for no gain. It now covers any
+     * source proposing a nonsensical volume.
+     *
      * <p>Not a gate: it is how an out-of-range AI suggestion is refused rather
      * than clamped. Clamping 99999 to 200 would ship a plausible-looking value
      * from a broken model.

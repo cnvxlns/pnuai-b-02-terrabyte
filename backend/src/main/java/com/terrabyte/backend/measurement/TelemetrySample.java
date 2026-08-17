@@ -31,7 +31,11 @@ public record TelemetrySample(
         Double soilTemperatureC,
         boolean soilSensorValid,
         boolean airSensorValid,
-        boolean lightSensorValid) {
+        boolean lightSensorValid,
+        // Null whenever the edge could not compute a dose for this reading. The
+        // irrigation path falls back to the pot-size table rather than treating
+        // the absence as an error.
+        IrrigationSuggestion irrigationSuggestion) {
 
     public static TelemetrySample from(
             TelemetryEnvelope envelope,
@@ -58,6 +62,7 @@ public record TelemetrySample(
                 measurements.soilTemperatureC(),
                 quality.soilSensorValidOrFalse(),
                 quality.airSensorValid(),
-                quality.lightSensorValid());
+                quality.lightSensorValid(),
+                node.irrigationSuggestion());
     }
 }

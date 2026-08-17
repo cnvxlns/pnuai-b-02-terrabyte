@@ -120,5 +120,84 @@ class ConfigTests(unittest.TestCase):
             Settings.from_env(env)
 
 
+class PotConfigTests(unittest.TestCase):
+    """Pot volume and crop, the two physical facts the edge is authoritative for.
+
+    Both are keyed by node id rather than positional so a reordering can never
+    hand one pot's settings to another.
+    """
+
+    def test_both_settings_are_optional(self) -> None:
+        settings = Settings.from_env(MQTT_ENV)
+        self.assertEqual(settings.pot_substrate_ml, {})
+        self.assertEqual(settings.pot_crop_codes, {})
+        self.assertIsNone(settings.substrate_volume_ml_for("node-1"))
+        self.assertIsNone(settings.crop_code_for("node-1"))
+
+    def test_node_keyed_entries_are_parsed(self) -> None:
+        settings = Settings.from_env(
+            dict(
+                MQTT_ENV,
+                TB_POT_SUBSTRATE_ML="node-1:3000",
+                TB_POT_CROPS="node-1:lettuce",
+            )
+        )
+        self.assertEqual(settings.substrate_volume_ml_for("node-1"), 3000)
+        self.assertEqual(settings.crop_code_for("node-1"), "lettuce")
+
+    def test_surrounding_whitespace_is_tolerated(self) -> None:
+        settings = Settings.from_env(
+            dict(MQTT_ENV, TB_POT_SUBSTRATE_ML=" node-1 : 1500 ")
+        )
+        self.assertEqual(settings.substrate_volume_ml_for("node-1"), 1500)
+
+    def test_a_node_id_this_gateway_does_not_serve_is_rejected(self) -> None:
+        """A typo here would size doses for a pot that is not plugged in.
+
+        Ignoring the entry would look identical to having configured nothing,
+        so the mistake has to stop the service instead.
+        """
+
+        for name in ("TB_POT_SUBSTRATE_ML", "TB_POT_CROPS"):
+            value = "node-2:3000" if name.endswith("ML") else "node-2:lettuce"
+            with self.subTest(setting=name):
+                with self.assertRaisesRegex(ConfigError, "node-2"):
+                    Settings.from_env(dict(MQTT_ENV, **{name: value}))
+
+    def test_an_unknown_crop_code_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "durian"):
+            Settings.from_env(dict(MQTT_ENV, TB_POT_CROPS="node-1:durian"))
+
+    def test_a_node_id_containing_a_colon_still_parses(self) -> None:
+        """Node ids may contain ':', so the split has to be on the last one."""
+
+        env = dict(
+            MQTT_ENV,
+            TB_EXPECTED_NODE_ID="node_A-1.2:usb",
+            TB_POT_SUBSTRATE_ML="node_A-1.2:usb:1500",
+        )
+        self.assertEqual(
+            Settings.from_env(env).substrate_volume_ml_for("node_A-1.2:usb"), 1500
+        )
+
+    def test_malformed_entries_are_rejected(self) -> None:
+        for value in ("node-1", "3000", ":3000", "node-1:"):
+            with self.subTest(value=value):
+                with self.assertRaises(ConfigError):
+                    Settings.from_env(dict(MQTT_ENV, TB_POT_SUBSTRATE_ML=value))
+
+    def test_volumes_must_be_positive_whole_millilitres(self) -> None:
+        for value in ("node-1:0", "node-1:-500", "node-1:3.5", "node-1:big"):
+            with self.subTest(value=value):
+                with self.assertRaises(ConfigError):
+                    Settings.from_env(dict(MQTT_ENV, TB_POT_SUBSTRATE_ML=value))
+
+    def test_a_repeated_node_id_is_rejected_rather_than_last_wins(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "twice"):
+            Settings.from_env(
+                dict(MQTT_ENV, TB_POT_SUBSTRATE_ML="node-1:3000,node-1:1500")
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

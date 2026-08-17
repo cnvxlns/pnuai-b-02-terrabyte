@@ -1,11 +1,7 @@
 package com.terrabyte.backend.irrigation;
 
 import java.time.Clock;
-import java.util.Optional;
 
-import com.terrabyte.backend.ai.AiOutcome;
-import com.terrabyte.backend.ai.IrrigationPredictionRequest;
-import com.terrabyte.backend.ai.IrrigationVolumeResolver;
 import com.terrabyte.backend.api.ApiException;
 import com.terrabyte.backend.measurement.MeasurementStore;
 import com.terrabyte.backend.measurement.TelemetrySample;
@@ -20,24 +16,18 @@ import org.springframework.stereotype.Service;
 /**
  * Turns "this pot needs water" into an authorised, recorded command.
  *
- * <p>Order matters and is the whole point: the AI only ever proposes a number,
+ * <p>Order matters and is the whole point: the edge only ever proposes a number,
  * and that number then meets {@link IrrigationGovernor} exactly like a manual
- * request would. There is no path from a model output to a pump that skips the
- * gates.
+ * request would. There is no path from a suggested volume to a pump that skips
+ * the gates.
  */
 @Service
 public class IrrigationService {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(IrrigationService.class);
 
-    /**
-     * Must match the AI server's {@code input_schema_version}; a mismatch makes
-     * it refuse rather than answer for a contract it does not implement.
-     */
-    private static final int SCHEMA_VERSION = 1;
-
     private final IrrigationGovernor governor;
-    private final IrrigationVolumeResolver volumeResolver;
+    private final VolumeResolver volumeResolver;
     private final DeviceCommandRepository commandRepository;
     private final MeasurementStore measurementStore;
     private final PotRepository potRepository;
@@ -47,7 +37,7 @@ public class IrrigationService {
 
     public IrrigationService(
             IrrigationGovernor governor,
-            IrrigationVolumeResolver volumeResolver,
+            VolumeResolver volumeResolver,
             DeviceCommandRepository commandRepository,
             MeasurementStore measurementStore,
             PotRepository potRepository,
@@ -65,27 +55,28 @@ public class IrrigationService {
     }
 
     /**
-     * The rule engine decided water is needed; ask the AI how much and proceed.
+     * The rule engine decided water is needed; take the edge's dose and proceed.
      *
-     * <p>The AI's answer is advisory. If it is unreachable, slow, disagrees on
-     * the schema version, or returns something out of range, the resolver
-     * substitutes a volume from the pot-size table and the request continues —
-     * an AI outage must never stop a plant from being watered, and must never
-     * water it more than the envelope allows either.
+     * <p>The edge's answer is advisory. If it is missing or out of range the
+     * resolver substitutes a volume from the pot-size table and the request
+     * continues — a pot whose node cannot compute a dose still has to be watered,
+     * and never more than the envelope allows.
      */
     public IrrigationOutcome requestAutomatic(long potId, String correlationId) {
         Pot pot = requirePot(potId);
         TelemetrySample sample = measurementStore.findLatest(potId).orElse(null);
 
-        IrrigationVolumeResolver.ResolvedVolume resolved =
-                volumeResolver.resolveVolume(pot.substrateVolumeMl(), features(pot, sample));
+        VolumeResolver.ResolvedVolume resolved = volumeResolver.resolve(pot, sample);
 
-        CommandSource source =
-                resolved.outcome() == AiOutcome.OK ? CommandSource.RULE_AI : CommandSource.RULE;
+        boolean fromEdge = resolved.source() == VolumeSource.EDGE_SUGGESTION;
+        CommandSource source = fromEdge ? CommandSource.RULE_AI : CommandSource.RULE;
 
         AuthorizationResult result = governor.authorize(IrrigationRequest.fromModel(
                 potId, resolved.volumeMl(), source, correlationId,
-                resolved.modelVersion(), resolved.aiVolumeMl()));
+                resolved.modelVersion(),
+                // 폴백이 이겼더라도 엣지가 제안한 값을 남긴다. 거부된 99999 가
+                // 로그에만 있으면 사후에 어느 쪽이 고장났는지 지목할 수 없다.
+                resolved.edgeProposedMl()));
 
         return complete(result, resolved);
     }
@@ -104,7 +95,7 @@ public class IrrigationService {
     }
 
     private IrrigationOutcome complete(
-            AuthorizationResult result, IrrigationVolumeResolver.ResolvedVolume resolved) {
+            AuthorizationResult result, VolumeResolver.ResolvedVolume resolved) {
 
         if (result instanceof AuthorizationResult.Denied denied) {
             return IrrigationOutcome.denied(
@@ -142,37 +133,8 @@ public class IrrigationService {
                 grant,
                 granted.clampReason(),
                 dispatched,
-                resolved == null ? null : resolved.outcome(),
+                resolved == null ? null : resolved.source(),
                 resolved == null ? null : resolved.modelVersion());
-    }
-
-    private IrrigationPredictionRequest features(Pot pot, TelemetrySample sample) {
-        if (sample == null) {
-            // No reading at all. The Governor refuses on gate 1 regardless, so
-            // this only has to be well-formed — the refusal stays decided in
-            // exactly one place.
-            return new IrrigationPredictionRequest(
-                    SCHEMA_VERSION, pot.cropCode(), pot.substrateVolumeMl(),
-                    null, null, null, null, null, null);
-        }
-        return new IrrigationPredictionRequest(
-                SCHEMA_VERSION,
-                pot.cropCode(),
-                pot.substrateVolumeMl(),
-                sample.soilMoisturePct(),
-                sample.soilTemperatureC(),
-                sample.airTemperatureC(),
-                sample.airHumidityPct(),
-                sample.plantLightPpfdUmolM2S(),
-                hoursSinceLastIrrigation(pot.id()));
-    }
-
-    private Double hoursSinceLastIrrigation(long potId) {
-        Optional<java.time.Instant> last = commandRepository.lastCompletedAt(potId);
-        return last
-                .map(instant ->
-                        java.time.Duration.between(instant, clock.instant()).toMinutes() / 60.0)
-                .orElse(null);
     }
 
     private Pot requirePot(long potId) {

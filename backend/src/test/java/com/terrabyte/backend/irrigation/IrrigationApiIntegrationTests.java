@@ -43,6 +43,7 @@ class IrrigationApiIntegrationTests {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private IrrigationController controller;
+    @Autowired private IrrigationService irrigationService;
     @Autowired private IrrigationDecisionRepository decisions;
 
     @MockitoBean private MeasurementStore measurementStore;
@@ -70,7 +71,16 @@ class IrrigationApiIntegrationTests {
         return new TelemetrySample(
                 POT_ID, 1L, "node-1", "lettuce", "orangepi-pro-01", "evt-1",
                 Instant.now().minusSeconds(30), 1L, 22.0, 0L, 24.0, 55.0, 300.0, 21.0,
-                true, true, true);
+                true, true, true, null);
+    }
+
+    private static TelemetrySample sampleSuggesting(int volumeMl) {
+        return new TelemetrySample(
+                POT_ID, 1L, "node-1", "lettuce", "orangepi-pro-01", "evt-1",
+                Instant.now().minusSeconds(30), 1L, 22.0, 0L, 24.0, 55.0, 300.0, 21.0,
+                true, true, true,
+                new com.terrabyte.backend.measurement.IrrigationSuggestion(
+                        volumeMl, "water-balance-v1", "lettuce", 3000));
     }
 
     private MvcResult water(int volumeMl) throws Exception {
@@ -126,6 +136,45 @@ class IrrigationApiIntegrationTests {
     @Test
     void aNonPositiveVolumeIsRejectedByValidation() throws Exception {
         assertThat(water(0).getResponse().getStatus()).isEqualTo(400);
+    }
+
+    // -- the automatic path, now sized by the edge -------------------------
+
+    @Test
+    void anEdgeSuggestionSizesTheDoseAndIsAttributedToTheEdge() {
+        org.mockito.Mockito.when(measurementStore.findLatest(POT_ID))
+                .thenReturn(Optional.of(sampleSuggesting(118)));
+
+        IrrigationOutcome outcome = irrigationService.requestAutomatic(POT_ID, "evt-auto-1");
+
+        assertThat(outcome.granted()).isTrue();
+        assertThat(outcome.grantedMl()).isEqualTo(118);
+        assertThat(outcome.volumeSource()).isEqualTo(VolumeSource.EDGE_SUGGESTION);
+        assertThat(outcome.aiModelVersion()).isEqualTo("water-balance-v1");
+
+        IrrigationDecision decision = decisions.findRecentByPotId(POT_ID, 1).get(0);
+        assertThat(decision.source()).isEqualTo(CommandSource.RULE_AI);
+        // The audit columns keep their names: they still answer "what proposed
+        // this volume", and the answer is now the edge instead of a model server.
+        assertThat(decision.aiModelVersion()).isEqualTo("water-balance-v1");
+        assertThat(decision.aiRequestedMl()).isEqualTo(118);
+    }
+
+    @Test
+    void withoutASuggestionTheTableDecidesAndNothingIsAttributed() {
+        org.mockito.Mockito.when(measurementStore.findLatest(POT_ID))
+                .thenReturn(Optional.of(freshSample()));
+
+        IrrigationOutcome outcome = irrigationService.requestAutomatic(POT_ID, "evt-auto-2");
+
+        // Pot 1 has no recorded substrate volume, so the smallest band applies.
+        assertThat(outcome.grantedMl()).isEqualTo(40);
+        assertThat(outcome.volumeSource()).isEqualTo(VolumeSource.POT_SIZE_FALLBACK);
+        assertThat(outcome.aiModelVersion()).isNull();
+
+        IrrigationDecision decision = decisions.findRecentByPotId(POT_ID, 1).get(0);
+        assertThat(decision.source()).isEqualTo(CommandSource.RULE);
+        assertThat(decision.aiRequestedMl()).isNull();
     }
 
     @Test

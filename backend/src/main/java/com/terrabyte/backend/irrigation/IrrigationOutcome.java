@@ -2,8 +2,6 @@ package com.terrabyte.backend.irrigation;
 
 import java.time.Instant;
 
-import com.terrabyte.backend.ai.AiOutcome;
-
 /**
  * What happened to one irrigation request, in the shape the API returns.
  *
@@ -23,14 +21,15 @@ public record IrrigationOutcome(
         String detail,
         /** When the refusal lifts, or null when it clears on new data instead. */
         Instant nextAvailableAt,
-        AiOutcome aiOutcome,
+        VolumeSource volumeSource,
+        /** Kept under its old name: it still answers "what proposed this volume". */
         String aiModelVersion) {
 
     public static IrrigationOutcome granted(
             IrrigationGrant grant,
             ClampReason clampReason,
             boolean dispatched,
-            AiOutcome aiOutcome,
+            VolumeSource volumeSource,
             String aiModelVersion) {
         return new IrrigationOutcome(
                 true,
@@ -42,7 +41,7 @@ public record IrrigationOutcome(
                 null,
                 null,
                 null,
-                aiOutcome,
+                volumeSource,
                 aiModelVersion);
     }
 

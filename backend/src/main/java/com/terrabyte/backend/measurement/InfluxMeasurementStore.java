@@ -50,6 +50,22 @@ public class InfluxMeasurementStore implements MeasurementStore {
         if (sample.soilTemperatureC() != null) {
             point.addField("soil_temperature_c", sample.soilTemperatureC());
         }
+        // Fields, not tags, for the same reason as event_id above: the volume
+        // varies per sample, so tagging it would mint a new series per dose.
+        // The two "assumed" values are near-constant and would be safe as tags,
+        // but splitting one logical block across tags and fields makes the
+        // read-back path depend on which half survived.
+        IrrigationSuggestion suggestion = sample.irrigationSuggestion();
+        if (suggestion != null && suggestion.volumeMl() != null) {
+            point.addField("irrigation_suggestion_volume_ml", suggestion.volumeMl());
+            addOptional(point, "irrigation_suggestion_model_version", suggestion.modelVersion());
+            addOptional(point, "irrigation_suggestion_crop_code", suggestion.assumedCropCode());
+            if (suggestion.assumedSubstrateVolumeMl() != null) {
+                point.addField(
+                        "irrigation_suggestion_substrate_volume_ml",
+                        suggestion.assumedSubstrateVolumeMl());
+            }
+        }
         client.getWriteApiBlocking().writePoint(point);
     }
 
@@ -120,7 +136,25 @@ public class InfluxMeasurementStore implements MeasurementStore {
                 optionalNumber(values.get("soil_temperature_c")),
                 Boolean.TRUE.equals(values.get("soil_sensor_valid")),
                 Boolean.TRUE.equals(values.get("air_sensor_valid")),
-                Boolean.TRUE.equals(values.get("light_sensor_valid")));
+                Boolean.TRUE.equals(values.get("light_sensor_valid")),
+                toSuggestion(values));
+    }
+
+    /**
+     * The volume is what makes a suggestion a suggestion; without it the other
+     * three columns describe an estimate that was never made, so the whole block
+     * reads back as absent.
+     */
+    private IrrigationSuggestion toSuggestion(Map<String, Object> values) {
+        Integer volumeMl = optionalInt(values.get("irrigation_suggestion_volume_ml"));
+        if (volumeMl == null) {
+            return null;
+        }
+        return new IrrigationSuggestion(
+                volumeMl,
+                optional(values, "irrigation_suggestion_model_version"),
+                optional(values, "irrigation_suggestion_crop_code"),
+                optionalInt(values.get("irrigation_suggestion_substrate_volume_ml")));
     }
 
     private Number number(Object value) {
@@ -134,6 +168,16 @@ public class InfluxMeasurementStore implements MeasurementStore {
     // writes soil_temperature_c, and that must read back as null, not 0.0.
     private Double optionalNumber(Object value) {
         return value instanceof Number number ? number.doubleValue() : null;
+    }
+
+    private Integer optionalInt(Object value) {
+        return value instanceof Number number ? number.intValue() : null;
+    }
+
+    private void addOptional(Point point, String field, String value) {
+        if (value != null && !value.isBlank()) {
+            point.addField(field, value);
+        }
     }
 
     private String optional(Map<String, Object> values, String key) {

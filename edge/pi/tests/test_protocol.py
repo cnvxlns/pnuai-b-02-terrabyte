@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import math
@@ -6,6 +7,7 @@ import uuid
 
 from terrabyte_edge.protocol import (
     Event,
+    IrrigationSuggestion,
     NonTelemetryMessage,
     ProtocolError,
     parse_line,
@@ -205,3 +207,62 @@ class SoilMetricTests(unittest.TestCase):
         restored = Event.from_record(legacy)
         self.assertIsNone(restored.soil_temperature_c)
         self.assertIsNone(restored.soil_moisture_pct)
+
+
+class IrrigationSuggestionTests(unittest.TestCase):
+    """The edge-computed watering volume that rides along with the reading."""
+
+    SUGGESTION = IrrigationSuggestion(
+        volume_ml=118,
+        model_version="water-balance-v1",
+        assumed_crop_code="lettuce",
+        assumed_substrate_volume_ml=3000,
+    )
+
+    def test_the_block_reaches_the_node_item_with_its_assumptions(self) -> None:
+        """``assumed_*`` is what lets the backend see its pot record drift."""
+
+        event = replace(parse(line(VALID)), irrigation_suggestion=self.SUGGESTION)
+
+        node = event.envelope_v2(gateway_id="gw")["nodes"][0]
+        self.assertEqual(
+            node["irrigation_suggestion"],
+            {
+                "volume_ml": 118,
+                "model_version": "water-balance-v1",
+                "assumed_crop_code": "lettuce",
+                "assumed_substrate_volume_ml": 3000,
+            },
+        )
+
+    def test_the_block_is_omitted_whole_when_nothing_could_be_computed(self) -> None:
+        """No key at all, so the backend falls back to its pot-size table."""
+
+        node = parse(line(VALID)).envelope_v2(gateway_id="gw")["nodes"][0]
+        self.assertNotIn("irrigation_suggestion", node)
+
+    def test_unconfigured_assumptions_are_omitted_not_nulled(self) -> None:
+        suggestion = IrrigationSuggestion(
+            volume_ml=40, model_version="water-balance-v1"
+        )
+        self.assertEqual(
+            suggestion.to_payload(),
+            {"volume_ml": 40, "model_version": "water-balance-v1"},
+        )
+
+    def test_a_suggestion_survives_an_outbox_round_trip(self) -> None:
+        event = replace(parse(line(VALID)), irrigation_suggestion=self.SUGGESTION)
+        restored = Event.from_record(json.loads(json.dumps(event.to_record())))
+        self.assertEqual(restored, event)
+        self.assertEqual(restored.irrigation_suggestion, self.SUGGESTION)
+
+    def test_a_record_queued_before_suggestions_existed_still_loads(self) -> None:
+        """Old outbox rows have no such key; they must not fail to deserialise."""
+
+        event = parse(line(VALID))
+        legacy = {
+            key: value
+            for key, value in event.to_record().items()
+            if key != "irrigation_suggestion"
+        }
+        self.assertIsNone(Event.from_record(legacy).irrigation_suggestion)

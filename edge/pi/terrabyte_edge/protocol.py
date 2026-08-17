@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
 import math
@@ -16,6 +16,43 @@ class ProtocolError(ValueError):
 
 class NonTelemetryMessage(ProtocolError):
     """Raised for valid protocol messages that carry no measurements."""
+
+
+@dataclass(frozen=True)
+class IrrigationSuggestion:
+    """Edge-computed watering volume for this node's pot.
+
+    ``assumed_crop_code`` and ``assumed_substrate_volume_ml`` are not inputs the
+    backend needs in order to act -- they are the edge's own configuration,
+    shipped so the backend can compare them against its ``pot`` record and log
+    a loud WARN when the two disagree. Pot volume is physical config the edge is
+    authoritative for, so on a mismatch the backend keeps the suggestion and
+    reports the drift rather than silently overriding it
+    (docs/design/irrigation_volume.md §2, §3.1). Without these two fields a
+    dose sized for the wrong pot looks exactly like a correct one.
+    """
+
+    volume_ml: int
+    model_version: str
+    assumed_crop_code: str | None = None
+    assumed_substrate_volume_ml: int | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        """Wire form. Unknowns are omitted, never sent as null.
+
+        Same rule the soil measurements follow below: an absent key says "not
+        configured", where ``null`` would read as a decision that was made.
+        """
+
+        payload: dict[str, object] = {
+            "volume_ml": self.volume_ml,
+            "model_version": self.model_version,
+        }
+        if self.assumed_crop_code is not None:
+            payload["assumed_crop_code"] = self.assumed_crop_code
+        if self.assumed_substrate_volume_ml is not None:
+            payload["assumed_substrate_volume_ml"] = self.assumed_substrate_volume_ml
+        return payload
 
 
 @dataclass(frozen=True)
@@ -37,6 +74,11 @@ class Event:
     soil_temperature_c: float | None = None
     soil_moisture_pct: float | None = None
     soil_moisture_raw_adc: int | None = None
+    # Not from the wire: computed by the service from this event's readings and
+    # the node's configured pot. Defaulted for the same reason as the soil
+    # fields above — an outbox row queued by a build that predates this field
+    # must still deserialise.
+    irrigation_suggestion: IrrigationSuggestion | None = None
 
     @property
     def has_soil_reading(self) -> bool:
@@ -70,28 +112,34 @@ class Event:
         if self.soil_moisture_raw_adc is not None:
             measurements["soil_moisture_raw_adc"] = self.soil_moisture_raw_adc
 
+        node: dict[str, object] = {
+            "node_id": self.node_id,
+            "sequence": self.sequence,
+            "measurements": measurements,
+            "quality": {
+                # Ranges were already enforced by parse_line() before this
+                # Event was constructed, so every reading present here is valid
+                # by construction. An absent soil probe reports false, matching
+                # "unusable for irrigation".
+                "air_sensor_valid": True,
+                "light_sensor_valid": True,
+                "soil_sensor_valid": self.has_soil_reading,
+            },
+        }
+        # Omitted whole when the edge could not compute it (no moisture reading,
+        # or no configured pot volume). The backend then uses its pot-size
+        # fallback table; a fabricated number would displace that fallback and
+        # look exactly as trustworthy as a real one (§3.1).
+        if self.irrigation_suggestion is not None:
+            node["irrigation_suggestion"] = self.irrigation_suggestion.to_payload()
+
         return {
             "schema_version": 2,
             "event_type": "telemetry.sample",
             "gateway_id": gateway_id,
             "event_id": self.event_id,
             "observed_at": self.captured_at_utc,
-            "nodes": [
-                {
-                    "node_id": self.node_id,
-                    "sequence": self.sequence,
-                    "measurements": measurements,
-                    "quality": {
-                        # Ranges were already enforced by parse_line() before
-                        # this Event was constructed, so every reading present
-                        # here is valid by construction. An absent soil probe
-                        # reports false, matching "unusable for irrigation".
-                        "air_sensor_valid": True,
-                        "light_sensor_valid": True,
-                        "soil_sensor_valid": self.has_soil_reading,
-                    },
-                }
-            ],
+            "nodes": [node],
         }
 
     def to_record(self) -> dict[str, object]:
@@ -108,11 +156,28 @@ class Event:
             "soil_temperature_c": self.soil_temperature_c,
             "soil_moisture_pct": self.soil_moisture_pct,
             "soil_moisture_raw_adc": self.soil_moisture_raw_adc,
+            # Every field, including the ones ``to_payload`` omits: this is
+            # storage, and it has to round-trip back into the same object.
+            "irrigation_suggestion": (
+                None
+                if self.irrigation_suggestion is None
+                else asdict(self.irrigation_suggestion)
+            ),
         }
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> "Event":
-        return cls(**record)
+        # Popped rather than passed through: the nested suggestion is a dict in
+        # the stored JSON blob and a dataclass in memory. A row written before
+        # this field existed simply has no key, and defaults to None.
+        fields = dict(record)
+        suggestion = fields.pop("irrigation_suggestion", None)
+        return cls(
+            **fields,
+            irrigation_suggestion=(
+                None if suggestion is None else IrrigationSuggestion(**suggestion)
+            ),
+        )
 
 
 def _uint32(message: dict[str, Any], name: str) -> int:

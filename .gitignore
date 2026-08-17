@@ -67,3 +67,8 @@ docs/superpowers/
 
 # 합성 벤치 캡처는 tools/make_bench_capture.py로 재생성한다.
 edge/pi/data/raw/
+
+# 관수량 AI 서버는 폐기됐다 — 산출을 엣지 물수지 수식으로 옮겼다.
+# 근거는 docs/design/irrigation_volume.md, 코드는 feature/ai-server 브랜치에 남아 있다.
+# 로컬 작업 디렉터리(.venv·모델 아티팩트)가 실수로 커밋되지 않게 막는다.
+ai-server/

@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 from threading import Event, Thread
 
 from .backend import HttpPublisher
 from .config import Settings
+from .irrigation.volume import MODEL_VERSION, suggest_volume_ml
 from .mqtt_publisher import MqttPublisher
 from .outbox import Outbox, OutboxFullError
-from .protocol import NonTelemetryMessage, ProtocolError, parse_line
+from .protocol import (
+    # Aliased because ``Event`` already means threading's here, and renaming
+    # that would touch every worker loop.
+    Event as TelemetryEvent,
+    IrrigationSuggestion,
+    NonTelemetryMessage,
+    ProtocolError,
+    parse_line,
+)
 from .publisher import Delivery, Publisher
 from .serial_reader import SerialLineReader
 
@@ -96,6 +106,46 @@ class BridgeService:
         for line in self.serial_reader.lines(self.stop_event):
             self._ingest_line(line)
 
+    def _suggest_irrigation(
+        self, event: TelemetryEvent
+    ) -> IrrigationSuggestion | None:
+        """Size a dose for this reading, or ``None`` if it cannot be sized.
+
+        This lives in the service rather than in ``parse_line`` on purpose.
+        ``parse_line`` answers one question — "is this line a valid telemetry
+        message?" — using only the bytes it was handed. Sizing needs deployment
+        configuration (which pot, which crop), which is the service's to know;
+        threading it through the parser as a callback would put config in the
+        one function that must stay decidable from the wire alone.
+        """
+
+        substrate_volume_ml = self.settings.substrate_volume_ml_for(event.node_id)
+        crop_code = self.settings.crop_code_for(event.node_id)
+        volume_ml = suggest_volume_ml(
+            soil_moisture_pct=event.soil_moisture_pct,
+            air_temperature_c=event.air_temperature_c,
+            air_humidity_pct=event.relative_humidity_pct,
+            ppfd_umol_m2_s=event.ppfd_umol_m2_s,
+            soil_temperature_c=event.soil_temperature_c,
+            # The edge keeps no irrigation history — there is no path to run
+            # the pump from here yet (G5) — so the formula's "long since
+            # watered" default stands in, and the redistribution term
+            # contributes nothing.
+            hours_since_last_irrigation=None,
+            substrate_volume_ml=substrate_volume_ml,
+            crop_code=crop_code,
+        )
+        if volume_ml is None:
+            return None
+        return IrrigationSuggestion(
+            volume_ml=volume_ml,
+            model_version=MODEL_VERSION,
+            # Echoed back so the backend can catch its pot record drifting from
+            # what is physically plugged in here.
+            assumed_crop_code=crop_code,
+            assumed_substrate_volume_ml=substrate_volume_ml,
+        )
+
     def _ingest_line(self, line: bytes) -> None:
         try:
             event = parse_line(
@@ -110,6 +160,11 @@ class BridgeService:
         except ProtocolError as exc:
             LOGGER.warning("discarding invalid telemetry reason=%s", exc)
             return
+        # Computed before the row is queued so the suggestion is durable with
+        # the reading that produced it. Sizing at upload time instead would let
+        # a config change between capture and delivery attach a volume to a
+        # reading taken from a different pot.
+        event = replace(event, irrigation_suggestion=self._suggest_irrigation(event))
         try:
             enqueued = self.outbox.enqueue(event)
         except OutboxFullError as exc:

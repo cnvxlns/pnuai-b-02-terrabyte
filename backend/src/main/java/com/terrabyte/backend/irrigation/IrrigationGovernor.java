@@ -30,8 +30,10 @@ import org.springframework.transaction.annotation.Transactional;
  * quietly never gets watered is as much a failure as one that floods, and only
  * the stored refusals make the first case visible.
  *
- * <p>The AI has no say in gates 1–6. It only proposes a number, which arrives
- * as {@code requestedMl} and meets gate 7 like any other.
+ * <p>Whatever sized the dose — the edge's water-balance formula, the pot-size
+ * table, or a person tapping a button — has no say in gates 1–6. It only
+ * proposes a number, which arrives as {@code requestedMl} and meets gate 7 like
+ * any other.
  */
 @Service
 public class IrrigationGovernor {

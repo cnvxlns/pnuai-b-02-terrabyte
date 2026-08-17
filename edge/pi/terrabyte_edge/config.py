@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
-from typing import Mapping
+from typing import Callable, Mapping, TypeVar
 from urllib.parse import urlparse
+
+from .irrigation.volume import SUPPORTED_CROP_CODES
 
 
 class ConfigError(ValueError):
@@ -58,6 +60,86 @@ def _boolean(env: Mapping[str, str], name: str, default: bool = False) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     raise ConfigError(f"{name} must be true or false")
+
+
+Value = TypeVar("Value")
+
+
+def _node_keyed_map(
+    env: Mapping[str, str],
+    name: str,
+    *,
+    known_node_ids: frozenset[str],
+    parse_value: Callable[[str], Value],
+) -> dict[str, Value]:
+    """Parse ``node-a:value,node-b:value`` into a mapping keyed by node id.
+
+    Keyed rather than positional. A bare comma-separated list would have to be
+    matched against the node allowlist by position, and a reordering there
+    would hand one pot's settings to another pot without anything looking
+    wrong. The node id travels with its value instead.
+
+    Split on the *last* colon: node ids legitimately contain colons (the
+    firmware's safe set includes ``:``, e.g. ``node_A-1.2:usb``) while neither
+    a volume nor a crop code does.
+
+    An entry naming a node this gateway does not serve is rejected, not
+    ignored. It is a typo, and a typo that sizes doses for the wrong pot is the
+    exact failure this configuration exists to prevent — so it must stop the
+    service at startup rather than quietly do nothing.
+    """
+
+    raw = env.get(name, "").strip()
+    if not raw:
+        return {}
+    parsed: dict[str, Value] = {}
+    for chunk in raw.split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        node_id, separator, value = entry.rpartition(":")
+        node_id = node_id.strip()
+        if not separator or not node_id:
+            raise ConfigError(f"{name} entries must be node_id:value")
+        if NODE_ID.fullmatch(node_id) is None:
+            raise ConfigError(f"{name} has a node id with unsupported characters")
+        if node_id not in known_node_ids:
+            raise ConfigError(
+                f"{name} names node id {node_id!r}, which this gateway does not "
+                "serve; expected one of " + ", ".join(sorted(known_node_ids))
+            )
+        if node_id in parsed:
+            raise ConfigError(f"{name} lists node id {node_id!r} twice")
+        parsed[node_id] = parse_value(value.strip())
+    return parsed
+
+
+def _substrate_ml(name: str) -> Callable[[str], int]:
+    def parse(raw: str) -> int:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ConfigError(f"{name} volumes must be whole millilitres") from exc
+        if value <= 0:
+            raise ConfigError(f"{name} volumes must be positive")
+        return value
+
+    return parse
+
+
+def _crop_code(name: str) -> Callable[[str], str]:
+    def parse(raw: str) -> str:
+        if raw not in SUPPORTED_CROP_CODES:
+            # An unrecognised code would silently fall back to the default
+            # moisture target, which is indistinguishable from a correctly
+            # configured default crop. Fail instead.
+            raise ConfigError(
+                f"{name} has unknown crop code {raw!r}; supported: "
+                + ", ".join(sorted(SUPPORTED_CROP_CODES))
+            )
+        return raw
+
+    return parse
 
 
 def _utc_timestamp(env: Mapping[str, str], name: str, default: str) -> datetime:
@@ -130,6 +212,19 @@ class Settings:
     mqtt_topic_prefix: str
     mqtt_keepalive_seconds: int
     mqtt_publish_timeout_seconds: float
+    # Physical config the edge is authoritative for: which pot is plugged in is
+    # something the person at the bench knows and the server only records. Both
+    # maps are optional — a node missing from them simply gets no suggestion
+    # (or the default crop target), which the backend answers with its pot-size
+    # fallback table (docs/design/irrigation_volume.md §2, §3.2).
+    pot_substrate_ml: dict[str, int]
+    pot_crop_codes: dict[str, str]
+
+    def substrate_volume_ml_for(self, node_id: str) -> int | None:
+        return self.pot_substrate_ml.get(node_id)
+
+    def crop_code_for(self, node_id: str) -> str | None:
+        return self.pot_crop_codes.get(node_id)
 
     def mqtt_telemetry_topic(self) -> str:
         return f"{self.mqtt_topic_prefix}/{self.device_id}/up/telemetry"
@@ -203,6 +298,11 @@ class Settings:
         if NODE_ID.fullmatch(expected_node_id) is None:
             raise ConfigError("TB_EXPECTED_NODE_ID contains unsupported characters")
 
+        # One Arduino per gateway today, so the allowlist has one member. Kept
+        # as a set because the pot maps are written to survive a multi-node
+        # gateway without their parsing changing.
+        known_node_ids = frozenset({expected_node_id})
+
         return cls(
             serial_port=_required(values, "TB_SERIAL_PORT"),
             serial_baud=_integer(values, "TB_SERIAL_BAUD", 115200),
@@ -252,5 +352,17 @@ class Settings:
             ),
             mqtt_publish_timeout_seconds=_number(
                 values, "TB_MQTT_PUBLISH_TIMEOUT_SECONDS", 10.0, minimum=0.1
+            ),
+            pot_substrate_ml=_node_keyed_map(
+                values,
+                "TB_POT_SUBSTRATE_ML",
+                known_node_ids=known_node_ids,
+                parse_value=_substrate_ml("TB_POT_SUBSTRATE_ML"),
+            ),
+            pot_crop_codes=_node_keyed_map(
+                values,
+                "TB_POT_CROPS",
+                known_node_ids=known_node_ids,
+                parse_value=_crop_code("TB_POT_CROPS"),
             ),
         )

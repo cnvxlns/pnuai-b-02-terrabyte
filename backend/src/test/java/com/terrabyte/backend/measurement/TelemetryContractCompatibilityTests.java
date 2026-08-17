@@ -131,6 +131,69 @@ class TelemetryContractCompatibilityTests {
         }
     }
 
+    /**
+     * The edge computes its own irrigation volume from a water-balance formula
+     * and ships it with the reading it came from. It is emitted only when the
+     * edge can actually compute one, so both this shape and the two above have
+     * to parse.
+     */
+    private static final String EDGE_PAYLOAD_WITH_SUGGESTION = """
+            {"schema_version":2,"event_type":"telemetry.sample",\
+            "gateway_id":"orangepi-pro-01",\
+            "event_id":"12345678-1234-5678-1234-567812345678",\
+            "observed_at":"2026-07-21T04:05:06Z",\
+            "nodes":[{"node_id":"terrabyte-node-01","sequence":42,\
+            "measurements":{"air_temperature_c":24.5,"air_humidity_pct":61.2,\
+            "plant_light_ppfd_umol_m2_s":382.0,"soil_temperature_c":18.5,\
+            "soil_moisture_pct":50.5},\
+            "quality":{"air_sensor_valid":true,"light_sensor_valid":true,\
+            "soil_sensor_valid":true},\
+            "irrigation_suggestion":{"volume_ml":118,\
+            "model_version":"water-balance-v1","assumed_crop_code":"lettuce",\
+            "assumed_substrate_volume_ml":3000}}]}""";
+
+    @Test
+    void deserialisesTheEdgePayloadThatCarriesAnIrrigationSuggestion() throws Exception {
+        TelemetryEnvelope envelope =
+                objectMapper.readValue(EDGE_PAYLOAD_WITH_SUGGESTION, TelemetryEnvelope.class);
+        IrrigationSuggestion suggestion = envelope.nodes().get(0).irrigationSuggestion();
+
+        assertThat(suggestion).isNotNull();
+        assertThat(suggestion.volumeMl()).isEqualTo(118);
+        assertThat(suggestion.modelVersion()).isEqualTo("water-balance-v1");
+        assertThat(suggestion.assumedCropCode()).isEqualTo("lettuce");
+        assertThat(suggestion.assumedSubstrateVolumeMl()).isEqualTo(3000);
+
+        try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {
+            assertThat(factory.getValidator().validate(envelope)).isEmpty();
+        }
+    }
+
+    @Test
+    void aPayloadWithoutTheSuggestionBlockIsStillValid() throws Exception {
+        // The block is optional on the wire. Requiring it would refuse every
+        // reading from a node that cannot compute a dose — the exact mistake v1
+        // made by requiring soil_moisture_raw_adc.
+        TelemetryEnvelope envelope =
+                objectMapper.readValue(EDGE_PAYLOAD, TelemetryEnvelope.class);
+
+        assertThat(envelope.nodes().get(0).irrigationSuggestion()).isNull();
+        try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {
+            assertThat(factory.getValidator().validate(envelope)).isEmpty();
+        }
+    }
+
+    @Test
+    void aSuggestionAboveTheContractedCeilingFailsValidation() throws Exception {
+        String tooLarge = EDGE_PAYLOAD_WITH_SUGGESTION.replace("\"volume_ml\":118", "\"volume_ml\":501");
+
+        TelemetryEnvelope envelope = objectMapper.readValue(tooLarge, TelemetryEnvelope.class);
+
+        try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {
+            assertThat(factory.getValidator().validate(envelope)).isNotEmpty();
+        }
+    }
+
     @Test
     void aV1PayloadIsRejected() throws Exception {
         // v1 shape: schema_version 1, device_id, and the context block whose

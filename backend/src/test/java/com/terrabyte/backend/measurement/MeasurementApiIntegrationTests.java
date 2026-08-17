@@ -155,7 +155,8 @@ class MeasurementApiIntegrationTests {
                         1,
                         new TelemetryEnvelope.Measurements(
                                 27.1, 58.0, 230.5, null, null, null),
-                        new TelemetryEnvelope.Quality(true, true, null)))));
+                        new TelemetryEnvelope.Quality(true, true, null),
+                        null))));
 
         mockMvc.perform(post("/api/telemetry").contentType(APPLICATION_JSON).content(body))
                 .andExpect(status().isAccepted())
@@ -204,7 +205,8 @@ class MeasurementApiIntegrationTests {
                         1,
                         new TelemetryEnvelope.Measurements(
                                 27.1, 58.0, 230.5, 19.4, 45.0, 1847L),
-                        new TelemetryEnvelope.Quality(true, true, true)))));
+                        new TelemetryEnvelope.Quality(true, true, true),
+                        null))));
 
         mockMvc.perform(post("/api/telemetry").contentType(APPLICATION_JSON).content(body))
                 .andExpect(status().isAccepted());
@@ -229,7 +231,8 @@ class MeasurementApiIntegrationTests {
                         1,
                         new TelemetryEnvelope.Measurements(
                                 27.1, 58.0, 230.5, null, null, null),
-                        new TelemetryEnvelope.Quality(true, true, null)))));
+                        new TelemetryEnvelope.Quality(true, true, null),
+                        null))));
 
         mockMvc.perform(post("/api/telemetry").contentType(APPLICATION_JSON).content(body))
                 .andExpect(status().isAccepted());
@@ -240,6 +243,53 @@ class MeasurementApiIntegrationTests {
         // Must be null, not 0.0 — a confident 0°C is indistinguishable from a
         // real cold reading, whereas null correctly says "no probe wired in".
         assertThat(captor.getValue().soilTemperatureC()).isNull();
+    }
+
+    @Test
+    void carriesTheEdgeIrrigationSuggestionThroughToTheStoredSample() throws Exception {
+        // Raw JSON rather than a serialised record: this pins the wire names the
+        // edge actually sends, which serialising our own record cannot do.
+        String body = telemetryBodyWithSuggestion("""
+                ,"irrigation_suggestion":{"volume_ml":118,\
+                "model_version":"water-balance-v1",\
+                "assumed_crop_code":"lettuce",\
+                "assumed_substrate_volume_ml":3000}""");
+
+        mockMvc.perform(post("/api/telemetry").contentType(APPLICATION_JSON).content(body))
+                .andExpect(status().isAccepted());
+
+        org.mockito.ArgumentCaptor<TelemetrySample> captor =
+                org.mockito.ArgumentCaptor.forClass(TelemetrySample.class);
+        verify(measurementStore).write(captor.capture());
+        assertThat(captor.getValue().irrigationSuggestion())
+                .isEqualTo(new IrrigationSuggestion(118, "water-balance-v1", "lettuce", 3000));
+    }
+
+    @Test
+    void acceptsAnEnvelopeWithNoIrrigationSuggestionAtAll() throws Exception {
+        // The edge omits the block whenever it cannot compute a dose, which is
+        // an ordinary reading and must not be refused.
+        mockMvc.perform(post("/api/telemetry")
+                        .contentType(APPLICATION_JSON)
+                        .content(telemetryBodyWithSuggestion("")))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.accepted").value(true));
+
+        org.mockito.ArgumentCaptor<TelemetrySample> captor =
+                org.mockito.ArgumentCaptor.forClass(TelemetrySample.class);
+        verify(measurementStore).write(captor.capture());
+        assertThat(captor.getValue().irrigationSuggestion()).isNull();
+    }
+
+    @Test
+    void rejectsAnIrrigationSuggestionOutsideTheContractedRange() throws Exception {
+        mockMvc.perform(post("/api/telemetry")
+                        .contentType(APPLICATION_JSON)
+                        .content(telemetryBodyWithSuggestion("""
+                                ,"irrigation_suggestion":{"volume_ml":501,\
+                                "model_version":"water-balance-v1"}""")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
     }
 
     @Test
@@ -321,7 +371,26 @@ class MeasurementApiIntegrationTests {
                 nodeId,
                 sequence,
                 new TelemetryEnvelope.Measurements(27.0, 58.0, 230.0, 21.0, 40.0, 1000L),
-                new TelemetryEnvelope.Quality(true, true, true));
+                new TelemetryEnvelope.Quality(true, true, true),
+                null);
+    }
+
+    /** One node, with {@code suggestionJson} spliced in verbatim (may be empty). */
+    private String telemetryBodyWithSuggestion(String suggestionJson) {
+        return """
+                {"schema_version":2,"event_type":"telemetry.sample",\
+                "gateway_id":"%s","event_id":"%s","observed_at":"%s",\
+                "nodes":[{"node_id":"%s","sequence":7,\
+                "measurements":{"air_temperature_c":27.1,"air_humidity_pct":58.0,\
+                "plant_light_ppfd_umol_m2_s":230.5},\
+                "quality":{"air_sensor_valid":true,"light_sensor_valid":true,\
+                "soil_sensor_valid":false}%s}]}"""
+                .formatted(
+                        HARDWARE_ID,
+                        UUID.randomUUID(),
+                        Instant.now().minusSeconds(5),
+                        NODE_ID,
+                        suggestionJson);
     }
 
     private String telemetryBody(
@@ -353,7 +422,8 @@ class MeasurementApiIntegrationTests {
                         sequence,
                         new TelemetryEnvelope.Measurements(
                                 27.1, humidity, 230.5, 31.2, 45.0, 1847L),
-                        new TelemetryEnvelope.Quality(true, true, true))));
+                        new TelemetryEnvelope.Quality(true, true, true),
+                        null)));
         return objectMapper.writeValueAsString(envelope);
     }
 
@@ -375,7 +445,8 @@ class MeasurementApiIntegrationTests {
                 21.0,
                 true,
                 true,
-                true);
+                true,
+                null);
     }
 
     private CropScoreProfile profile(String cropCode, String cropName) {

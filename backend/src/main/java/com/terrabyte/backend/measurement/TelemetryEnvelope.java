@@ -48,7 +48,12 @@ public record TelemetryEnvelope(
             @NotBlank @Size(max = 64) String nodeId,
             @PositiveOrZero long sequence,
             @NotNull @Valid Measurements measurements,
-            @NotNull @Valid Quality quality) {
+            @NotNull @Valid Quality quality,
+            // Optional, and the only optional block on a node. The edge omits it
+            // whenever it cannot compute a dose, so requiring it would refuse
+            // perfectly good readings — the mistake the v1 contract made with
+            // soil_moisture_raw_adc.
+            @Valid IrrigationSuggestion irrigationSuggestion) {
     }
 
     /**
