@@ -10,7 +10,7 @@ import sqlite3
 import time
 from typing import Callable, Iterator
 
-from .protocol import Event
+from .protocol import CommandAck, Event, QueuedMessage
 
 
 # Message families that share the queue. They share it because they share the
@@ -27,10 +27,20 @@ KIND_TELEMETRY = "telemetry"
 KIND_ACK = "ack"
 KINDS = (KIND_TELEMETRY, KIND_ACK)
 
+# The row's ``kind`` also names its decoder. The two families are different
+# dataclasses with different required fields, so a single ``from_record`` would
+# have to guess from the keys present — and a telemetry row queued by an older
+# build legitimately lacks keys, which is exactly the case a guess gets wrong.
+# Keeping the mapping beside KINDS means adding a family is one entry in each.
+_RECORD_CODECS: dict[str, Callable[[dict], QueuedMessage]] = {
+    KIND_TELEMETRY: Event.from_record,
+    KIND_ACK: CommandAck.from_record,
+}
+
 
 @dataclass(frozen=True)
 class OutboxItem:
-    event: Event
+    event: QueuedMessage
     attempts: int
 
 
@@ -144,7 +154,7 @@ class Outbox:
                 f"ALTER TABLE telemetry_outbox ADD COLUMN {self._KIND_COLUMN}"
             )
 
-    def enqueue(self, event: Event, *, kind: str = KIND_TELEMETRY) -> bool:
+    def enqueue(self, event: QueuedMessage, *, kind: str = KIND_TELEMETRY) -> bool:
         # Checked here as well as in the schema, and the Python check is the one
         # that actually fires. The INSERT below is OR IGNORE — it has to be, so a
         # replayed event_id is a no-op rather than an error — but OR IGNORE also
@@ -187,6 +197,9 @@ class Outbox:
         that arrives out of order — see the KINDS comment.
         """
 
+        decode = _RECORD_CODECS.get(kind)
+        if decode is None:
+            raise ValueError(f"unknown outbox kind {kind!r}; expected one of {KINDS}")
         now = self.clock()
         with self._connect() as connection:
             rows = connection.execute(
@@ -207,7 +220,7 @@ class Outbox:
                 break
             due_rows.append(row)
         return [
-            OutboxItem(Event.from_record(json.loads(row["payload_json"])), row["attempts"])
+            OutboxItem(decode(json.loads(row["payload_json"])), row["attempts"])
             for row in due_rows
         ]
 

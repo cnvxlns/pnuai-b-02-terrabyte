@@ -1,13 +1,23 @@
-"""Arduino JSON Lines telemetry protocol v1 validation."""
+"""Arduino JSON Lines protocol validation, both directions.
+
+Telemetry v1 (long keys, Arduino -> Pi) and the command ack family (short keys,
+Arduino -> Pi) both live here because both are decided from serial bytes alone.
+The MQTT side of the command contract is ``command_relay.py``'s: this module
+never decides whether a dose may run, only what the wire said.
+"""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
+import logging
 import math
 from typing import Any, Callable
 import uuid
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ProtocolError(ValueError):
@@ -338,3 +348,234 @@ def parse_line(
         ),
         soil_moisture_raw_adc=_optional_uint32(message, "soil_moisture_raw_adc"),
     )
+
+
+# --- command acks -----------------------------------------------------------
+#
+# The four phases of one command's life. A single schema carries all four
+# (docs/design/edge_ai_hardening.md §MQTT contract), and the backend decides
+# state from ``phase`` alone — never from ``reason``, whose vocabulary differs
+# per layer. See command_relay.REASONS for why that separation matters.
+ACK_PHASES = ("accepted", "rejected", "completed", "aborted")
+
+# ``device_command.stop_cause`` is VARCHAR(30) on the backend. Truncating here
+# rather than there is deliberate: an over-long firmware token would otherwise
+# fail the INSERT and lose the whole ack — the one message that tells the server
+# a pump ran. A truncated diagnostic beats a dropped outcome.
+STOP_CAUSE_MAX_CHARS = 30
+
+
+def epoch_to_iso8601(epoch: float) -> str:
+    """Epoch seconds -> ``2026-08-04T10:00:18Z``.
+
+    Always UTC with a literal ``Z``: the backend parses these as ``Instant``,
+    and a local-offset timestamp from a box whose TZ is Asia/Seoul would be read
+    nine hours off.
+    """
+
+    return (
+        datetime.fromtimestamp(epoch, timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def parse_iso8601_utc(raw: str) -> datetime:
+    """Parse an ISO-8601 instant, **refusing a naive one**.
+
+    This function exists because of one specific bug class. ``expires_at``
+    arrives as ``2026-08-04T10:02:00Z`` and is compared against ``time.time()``
+    (epoch seconds, UTC). If the parse silently produced a *naive* datetime,
+    ``.timestamp()`` would interpret it in the box's **local** zone — on the
+    Orange Pi that is Asia/Seoul, i.e. nine hours early, so every command would
+    look long expired and no plant would ever be watered. Written the other way
+    round (``datetime.utcnow() < naive``) the same naivety makes commands look
+    nine hours *younger*, so nothing would ever expire and a delayed command
+    would still run. The failure is silent in both directions and the sign
+    depends on which side of the comparison the naive value lands.
+
+    So a value with no offset is a hard error rather than an assumption: the
+    contract says the instant is qualified, and guessing would pick one of the
+    two failure modes above.
+    """
+
+    if not isinstance(raw, str) or not raw.strip():
+        raise ProtocolError("timestamp must be a non-empty string")
+    text = raw.strip()
+    # fromisoformat only learned to accept a trailing Z in 3.11, and the
+    # deployed Orange Pi image is 3.10.
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        value = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ProtocolError(f"timestamp is not ISO-8601: {raw!r}") from exc
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ProtocolError(
+            f"timestamp {raw!r} carries no UTC offset; refusing to guess one"
+        )
+    return value.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class SerialAck:
+    """One ``{"t":"ack", ...}`` line, exactly as the firmware phrased it.
+
+    Deliberately not translated: ``stop_cause`` holds the firmware's own
+    lowercase token (``cooldown``, ``watchdog``, ``busy``, ...) verbatim. The
+    three layers of this system use three different reason vocabularies, and the
+    only way a diagnosis survives two translations is for the raw token to be
+    carried through untouched.
+    """
+
+    command_id: str
+    phase: str
+    runtime_ms: int | None = None
+    stop_cause: str | None = None
+    # Only if the firmware measures it. Absent is the normal case; the relay
+    # then derives an estimate from the commanded volume and the runtime.
+    volume_ml: int | None = None
+
+
+# The strictness split below is deliberate, and it is a safety judgement rather
+# than a style one. ``id`` and ``ph`` are what make an ack *mean* something: an
+# ack that cannot be correlated, or whose phase is unknown, cannot be applied to
+# any command and is rejected. Everything else is detail, and dropping the whole
+# frame over a bad detail is the worse outcome — the backend would then expire
+# the command and charge its granted volume to the daily budget, so the pot is
+# billed for water whose actual amount we merely failed to parse.
+
+
+def _lenient_token(message: dict[str, Any], name: str) -> str | None:
+    value = message.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        LOGGER.warning("ignoring unusable ack field %s=%r", name, value)
+        return None
+    return value.strip()[:STOP_CAUSE_MAX_CHARS]
+
+
+def _lenient_uint32(message: dict[str, Any], name: str) -> int | None:
+    try:
+        return _optional_uint32(message, name)
+    except ProtocolError:
+        LOGGER.warning(
+            "ignoring unusable ack field %s=%r", name, message.get(name)
+        )
+        return None
+
+
+def parse_serial_ack(message: dict[str, Any]) -> SerialAck:
+    """Validate one decoded short-key ack frame.
+
+    Takes the decoded dict rather than bytes because ``service._ingest_line``
+    has already decoded it to route on the envelope key — the asymmetric-link
+    trap documented there. Telemetry keeps its bytes-only parser; an ack has no
+    such requirement because its envelope key *is* the routing decision.
+    """
+
+    if message.get("t") != "ack":
+        raise ProtocolError("frame is not an ack")
+    command_id = message.get("id")
+    if not isinstance(command_id, str) or not 1 <= len(command_id.strip()) <= 64:
+        raise ProtocolError("ack id must be a 1..64 character string")
+    phase = message.get("ph")
+    if phase not in ACK_PHASES:
+        raise ProtocolError(f"ack ph must be one of {ACK_PHASES}")
+    # ``r`` on a rejection, ``stop`` on a completion or abort. Both name why,
+    # and both land in the same field: the backend stores one free-text cause.
+    stop_cause = _lenient_token(message, "stop") or _lenient_token(message, "r")
+    return SerialAck(
+        command_id=command_id.strip(),
+        phase=str(phase),
+        runtime_ms=_lenient_uint32(message, "ms"),
+        stop_cause=stop_cause,
+        volume_ml=_lenient_uint32(message, "ml"),
+    )
+
+
+@dataclass(frozen=True)
+class CommandAck:
+    """A command outcome on its way to the backend, durable in the outbox.
+
+    Queued rather than published directly for the same reason telemetry is: the
+    broker may be unreachable at the exact moment a pump stops. An ack that is
+    merely logged becomes a phantom budget deduction — the backend expires the
+    command and charges its granted volume to the daily budget anyway, so the
+    pot is billed for water it may never have received.
+
+    ``gateway_id`` is a publish-time parameter, not a field, matching
+    :meth:`Event.envelope_v2`: it is deployment-wide config rather than a
+    property of this outcome.
+    """
+
+    command_id: str
+    phase: str
+    at_utc: str
+    reason: str
+    correlation_id: str | None = None
+    node_id: str | None = None
+    pot_id: int | None = None
+    runtime_ms: int | None = None
+    estimated_ml: int | None = None
+    stop_cause: str | None = None
+
+    @property
+    def event_id(self) -> str:
+        """Outbox primary key, derived rather than random.
+
+        This is the pi-side half of the QoS 1 duplicate defence. A repeated
+        firmware ack, or the same line re-ingested after a reconnect, collapses
+        onto this key and the outbox's ``INSERT OR IGNORE`` makes the second
+        enqueue a no-op. A random uuid here would publish the same outcome twice
+        and the backend would see two transitions for one physical event.
+
+        Keyed by phase as well as command, because the four phases are four
+        distinct outcomes of the same command and all four must reach the server.
+        """
+
+        return f"ack:{self.command_id}:{self.phase}"
+
+    def ack_payload(self, *, gateway_id: str) -> dict[str, object]:
+        body: dict[str, object] = {
+            "schema_version": 2,
+            "message_type": "command_ack",
+            "command_id": self.command_id,
+            "gateway_id": gateway_id,
+            "phase": self.phase,
+            "at": self.at_utc,
+            "reason": self.reason,
+        }
+        # Echoed only when known. A rejection built from a command the pi could
+        # barely parse still carries command_id, which is all the backend needs
+        # to resolve the pot; omitting the rest says "unknown" where a null or a
+        # zero would read as a decision.
+        if self.correlation_id is not None:
+            body["correlation_id"] = self.correlation_id
+        if self.node_id is not None:
+            body["node_id"] = self.node_id
+        if self.pot_id is not None:
+            body["pot_id"] = self.pot_id
+        actual: dict[str, object] = {}
+        if self.runtime_ms is not None:
+            actual["runtime_ms"] = self.runtime_ms
+        if self.estimated_ml is not None:
+            actual["estimated_ml"] = self.estimated_ml
+        if self.stop_cause is not None:
+            actual["stop_cause"] = self.stop_cause
+        if actual:
+            body["actual"] = actual
+        return body
+
+    def to_record(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> "CommandAck":
+        return cls(**record)
+
+
+# What the durable queue can hold. Two families, two dataclasses, and the outbox
+# picks the decoder from the row's ``kind`` — see outbox._RECORD_CODECS.
+QueuedMessage = Event | CommandAck

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from terrabyte_edge.outbox import KIND_ACK, KIND_TELEMETRY, Outbox, OutboxFullError
-from terrabyte_edge.protocol import Event
+from terrabyte_edge.protocol import CommandAck, Event
 
 
 def event(event_id: str = "event-1") -> Event:
@@ -19,6 +19,15 @@ def event(event_id: str = "event-1") -> Event:
         air_temperature_c=20.0,
         relative_humidity_pct=50.0,
         ppfd_umol_m2_s=300.0,
+    )
+
+
+def ack(command_id: str, phase: str = "completed") -> CommandAck:
+    return CommandAck(
+        command_id=command_id,
+        phase=phase,
+        at_utc="2026-07-21T04:05:06Z",
+        reason="OK",
     )
 
 
@@ -139,31 +148,64 @@ class KindPartitioningTests(unittest.TestCase):
     def test_a_backed_off_observation_does_not_hold_up_an_ack(self) -> None:
         self.outbox.enqueue(event("oldest-observation"))
         self.now[0] += 0.1
-        self.outbox.enqueue(event("ack-1"), kind=KIND_ACK)
+        self.outbox.enqueue(ack("cmd-1"), kind=KIND_ACK)
         self.outbox.mark_retry("oldest-observation", 0, "offline", None)
 
         self.assertEqual(self.outbox.due(10, kind=KIND_TELEMETRY), [])
         self.assertEqual(
             [item.event.event_id for item in self.outbox.due(10, kind=KIND_ACK)],
-            ["ack-1"],
+            ["ack:cmd-1:completed"],
         )
 
     def test_ordering_is_still_preserved_within_a_kind(self) -> None:
-        self.outbox.enqueue(event("ack-old"), kind=KIND_ACK)
+        self.outbox.enqueue(ack("cmd-old"), kind=KIND_ACK)
         self.now[0] += 0.1
-        self.outbox.enqueue(event("ack-new"), kind=KIND_ACK)
-        self.outbox.mark_retry("ack-old", 0, "offline", None)
+        self.outbox.enqueue(ack("cmd-new"), kind=KIND_ACK)
+        self.outbox.mark_retry("ack:cmd-old:completed", 0, "offline", None)
 
         self.assertEqual(self.outbox.due(10, kind=KIND_ACK), [])
         self.now[0] += 2.0
         self.assertEqual(
             [item.event.event_id for item in self.outbox.due(10, kind=KIND_ACK)],
-            ["ack-old", "ack-new"],
+            ["ack:cmd-old:completed", "ack:cmd-new:completed"],
         )
+
+    def test_an_ack_row_round_trips_through_its_own_codec(self) -> None:
+        """The two kinds are different dataclasses, so the row names its decoder.
+
+        Decoding an ack row with Event.from_record raises on the first field it
+        does not recognise, which would take down the ack uploader thread — and
+        that thread's death is what turns every dose into a phantom budget
+        deduction.
+        """
+
+        self.outbox.enqueue(
+            CommandAck(
+                command_id="cmd-9",
+                phase="completed",
+                at_utc="2026-07-21T04:05:06Z",
+                reason="OK",
+                runtime_ms=17950,
+                estimated_ml=118,
+                stop_cause="volume_reached",
+            ),
+            kind=KIND_ACK,
+        )
+        (item,) = self.outbox.due(10, kind=KIND_ACK)
+        self.assertIsInstance(item.event, CommandAck)
+        self.assertEqual(item.event.stop_cause, "volume_reached")
+        self.assertEqual(item.event.estimated_ml, 118)
+
+    def test_the_same_outcome_enqueued_twice_is_one_row(self) -> None:
+        """QoS 1 duplicates exist at both hops; the derived event_id collapses them."""
+
+        self.assertTrue(self.outbox.enqueue(ack("cmd-2"), kind=KIND_ACK))
+        self.assertFalse(self.outbox.enqueue(ack("cmd-2"), kind=KIND_ACK))
+        self.assertEqual(self.outbox.counts(kind=KIND_ACK), (1, 0))
 
     def test_counts_are_repo_wide_by_default_and_filterable(self) -> None:
         self.outbox.enqueue(event("obs"))
-        self.outbox.enqueue(event("ack-1"), kind=KIND_ACK)
+        self.outbox.enqueue(ack("cmd-1"), kind=KIND_ACK)
         self.assertEqual(self.outbox.counts(), (2, 0))
         self.assertEqual(self.outbox.counts(kind=KIND_TELEMETRY), (1, 0))
         self.assertEqual(self.outbox.counts(kind=KIND_ACK), (1, 0))
