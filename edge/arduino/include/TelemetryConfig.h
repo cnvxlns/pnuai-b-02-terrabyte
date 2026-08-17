@@ -68,8 +68,30 @@
 #error "TB_GY30_I2C_ADDRESS must be 0x23 or 0x5C"
 #endif
 
-// BH1750 measures illuminance in lux, not PPFD. Enable this conversion only
-// after calibration against a PAR/PPFD reference using the final light source.
+// BH1750 measures illuminance in lux, not PPFD. A custom calibration against a
+// PAR/PPFD reference is preferred. Named profiles are only rough spectral
+// estimates and must not be treated as measured calibration.
+#define TB_PPFD_LIGHT_SOURCE_CUSTOM 0
+#define TB_PPFD_LIGHT_SOURCE_SUNLIGHT_APPROX 1
+#define TB_PPFD_LIGHT_SOURCE_COOL_WHITE_FLUORESCENT_APPROX 2
+#define TB_PPFD_LIGHT_SOURCE_HPS_APPROX 3
+#define TB_PPFD_LIGHT_SOURCE_METAL_HALIDE_APPROX 4
+#define TB_PPFD_LIGHT_SOURCE_WHITE_LED_4000K_APPROX 5
+
+#ifndef TB_PPFD_LIGHT_SOURCE
+#define TB_PPFD_LIGHT_SOURCE TB_PPFD_LIGHT_SOURCE_CUSTOM
+#endif
+
+#if TB_PPFD_LIGHT_SOURCE != TB_PPFD_LIGHT_SOURCE_CUSTOM &&                 \
+    TB_PPFD_LIGHT_SOURCE != TB_PPFD_LIGHT_SOURCE_SUNLIGHT_APPROX &&        \
+    TB_PPFD_LIGHT_SOURCE !=                                                \
+        TB_PPFD_LIGHT_SOURCE_COOL_WHITE_FLUORESCENT_APPROX &&              \
+    TB_PPFD_LIGHT_SOURCE != TB_PPFD_LIGHT_SOURCE_HPS_APPROX &&             \
+    TB_PPFD_LIGHT_SOURCE != TB_PPFD_LIGHT_SOURCE_METAL_HALIDE_APPROX &&     \
+    TB_PPFD_LIGHT_SOURCE != TB_PPFD_LIGHT_SOURCE_WHITE_LED_4000K_APPROX
+#error "TB_PPFD_LIGHT_SOURCE is not a supported light-source profile"
+#endif
+
 #ifndef TB_GY30_PPFD_CALIBRATION_ENABLED
 #define TB_GY30_PPFD_CALIBRATION_ENABLED 0
 #endif
@@ -79,6 +101,31 @@
 #endif
 
 #if !TB_MOCK_SENSOR_ENABLED && TB_GY30_PPFD_CALIBRATION_ENABLED
+#if TB_PPFD_LIGHT_SOURCE != TB_PPFD_LIGHT_SOURCE_CUSTOM
+#if defined(TB_PPFD_PER_LUX) || defined(TB_PPFD_OFFSET)
+#error "Named PPFD profiles cannot be combined with custom PPFD coefficients"
+#endif
+#if TB_PPFD_LIGHT_SOURCE == TB_PPFD_LIGHT_SOURCE_SUNLIGHT_APPROX
+#define TB_PPFD_PER_LUX 0.0185f
+#elif TB_PPFD_LIGHT_SOURCE == \
+    TB_PPFD_LIGHT_SOURCE_COOL_WHITE_FLUORESCENT_APPROX
+#define TB_PPFD_PER_LUX 0.0135f
+#elif TB_PPFD_LIGHT_SOURCE == TB_PPFD_LIGHT_SOURCE_HPS_APPROX
+#define TB_PPFD_PER_LUX 0.0122f
+#elif TB_PPFD_LIGHT_SOURCE == TB_PPFD_LIGHT_SOURCE_METAL_HALIDE_APPROX
+#define TB_PPFD_PER_LUX 0.0141f
+#elif TB_PPFD_LIGHT_SOURCE == TB_PPFD_LIGHT_SOURCE_WHITE_LED_4000K_APPROX
+#define TB_PPFD_PER_LUX 0.0143f
+#endif
+#define TB_PPFD_OFFSET 0.0f
+#ifndef TB_PPFD_CALIBRATED_MIN_LUX
+#define TB_PPFD_CALIBRATED_MIN_LUX 0.0f
+#endif
+#ifndef TB_PPFD_CALIBRATED_MAX_LUX
+#define TB_PPFD_CALIBRATED_MAX_LUX 54612.5f
+#endif
+#endif
+
 #ifndef TB_PPFD_PER_LUX
 #error "Define calibrated TB_PPFD_PER_LUX when GY-30 PPFD conversion is enabled"
 #endif

@@ -135,11 +135,12 @@ address is needed. The default configuration is:
 ```
 
 The firmware always reports the validated BH1750 reading as
-`illuminance_lux`. To additionally produce PPFD, calibration must provide the
-conversion coefficients and calibrated lux bounds:
+`illuminance_lux`. The safest way to additionally produce PPFD is a custom
+calibration with conversion coefficients and measured lux bounds:
 
 ```cpp
 #define TB_GY30_PPFD_CALIBRATION_ENABLED 1
+#define TB_PPFD_LIGHT_SOURCE TB_PPFD_LIGHT_SOURCE_CUSTOM
 #define TB_PPFD_PER_LUX 0.0123f
 #define TB_PPFD_OFFSET -1.25f
 #define TB_PPFD_CALIBRATED_MIN_LUX 100.0f
@@ -151,6 +152,30 @@ The calculation is:
 ```text
 PPFD (umol/m^2/s) = illuminance lux * TB_PPFD_PER_LUX + TB_PPFD_OFFSET
 ```
+
+For an uncalibrated estimate, a provisioner may instead select one named
+compile-time profile:
+
+```cpp
+#define TB_GY30_PPFD_CALIBRATION_ENABLED 1
+#define TB_PPFD_LIGHT_SOURCE TB_PPFD_LIGHT_SOURCE_SUNLIGHT_APPROX
+```
+
+Available approximate profiles are `SUNLIGHT_APPROX`,
+`COOL_WHITE_FLUORESCENT_APPROX`, `HPS_APPROX`, and `METAL_HALIDE_APPROX` (each
+prefixed with `TB_PPFD_LIGHT_SOURCE_`), plus the spectrum-specific
+`WHITE_LED_4000K_APPROX`. The first four generic factors come from
+[Apogee Instruments' conversion table](https://www.apogeeinstruments.com/conversion-ppfd-to-lux/);
+the 4000 K white LED example comes from the
+[AGi32 PPFD reference](https://docs.agi32.com/AGi32/Content/adding_calculation_points/PPFD_Concepts.htm).
+They depend on the source spectrum and are not a calibration of the installed
+BH1750, diffuser, lamp, distance, or geometry. LEDs with another color
+temperature or spectral mix are not represented by the 4000 K example; use a
+measured custom calibration for them.
+Named profiles use zero offset and the BH1750 measurement range by default;
+`TB_PPFD_CALIBRATED_MIN_LUX` and `TB_PPFD_CALIBRATED_MAX_LUX` can narrow the
+valid range. Unknown profiles and mixing named profiles with custom
+coefficients fail at compile time.
 
 The numbers above only demonstrate syntax; they are not calibration values and
 must not be copied to a device. The minimum and maximum are the lux range

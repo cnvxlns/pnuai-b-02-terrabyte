@@ -17,11 +17,23 @@
 #define TB_GY30_ENABLED 1
 #define TB_GY30_I2C_ADDRESS 0x23
 
-// Optional lux-to-PPFD conversion. Do not enable this with guessed constants;
-// calibrate against a PAR/PPFD meter using the final light source and geometry.
+// Optional lux-to-PPFD conversion. Custom measured calibration is preferred.
 // #define TB_GY30_PPFD_CALIBRATION_ENABLED 1
+// #define TB_PPFD_LIGHT_SOURCE TB_PPFD_LIGHT_SOURCE_CUSTOM
 // #define TB_PPFD_PER_LUX 0.01f
 // #define TB_PPFD_OFFSET 0.0f
+// #define TB_PPFD_CALIBRATED_MIN_LUX 100.0f
+// #define TB_PPFD_CALIBRATED_MAX_LUX 50000.0f
+
+// Alternatively select one approximate spectral profile below. These generic
+// factors are estimates, not a calibration of this BH1750, lamp, or geometry.
+// Do not also define TB_PPFD_PER_LUX or TB_PPFD_OFFSET for a named profile.
+// #define TB_GY30_PPFD_CALIBRATION_ENABLED 1
+// #define TB_PPFD_LIGHT_SOURCE TB_PPFD_LIGHT_SOURCE_SUNLIGHT_APPROX
+// Other choices: TB_PPFD_LIGHT_SOURCE_COOL_WHITE_FLUORESCENT_APPROX,
+// TB_PPFD_LIGHT_SOURCE_HPS_APPROX, TB_PPFD_LIGHT_SOURCE_METAL_HALIDE_APPROX,
+// TB_PPFD_LIGHT_SOURCE_WHITE_LED_4000K_APPROX.
+// Named profiles default to the BH1750 range; these may narrow that range:
 // #define TB_PPFD_CALIBRATED_MIN_LUX 100.0f
 // #define TB_PPFD_CALIBRATED_MAX_LUX 50000.0f
 
