@@ -1,14 +1,28 @@
-"""Command line entrypoint for ``python -m terrabyte_edge``."""
+"""Command line entrypoint for ``python -m terrabyte_edge``.
+
+Subcommands, with ``run`` as the default so the existing systemd unit's
+``ExecStart=... -m terrabyte_edge`` keeps working unchanged:
+
+    run        the telemetry bridge (default)
+    dashboard  full-screen status display for an attached monitor
+"""
 
 from __future__ import annotations
 
+import argparse
 import logging
+import os
 import signal
 import sys
+from pathlib import Path
 from threading import Event
 
 from .config import ConfigError, Settings
 from .service import BridgeService
+
+DEFAULT_SNAPSHOT_PATH = Path("/run/terrabyte-edge/status.json")
+DEFAULT_MANIFEST_PATH = Path("/etc/terrabyte-edge/provisioning.json")
+DEFAULT_MARKER_PATH = Path("/var/lib/terrabyte-edge/setup-complete")
 
 
 def _configure_logging(level: str) -> None:
@@ -18,7 +32,103 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="terrabyte_edge", description=__doc__)
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("run", help="텔레메트리 브릿지 실행 (기본값)")
+
+    dashboard = sub.add_parser("dashboard", help="모니터용 전체화면 상태 화면")
+    dashboard.add_argument(
+        "--snapshot-path",
+        type=Path,
+        default=Path(os.environ.get("TB_STATUS_SNAPSHOT_PATH", DEFAULT_SNAPSHOT_PATH)),
+    )
+    dashboard.add_argument(
+        "--windowed",
+        action="store_true",
+        help="전체화면 대신 창으로 실행 (개발용)",
+    )
+
+    wizard = sub.add_parser("wizard", help="최초 설정 마법사")
+    wizard.add_argument(
+        "--snapshot-path",
+        type=Path,
+        default=Path(os.environ.get("TB_STATUS_SNAPSHOT_PATH", DEFAULT_SNAPSHOT_PATH)),
+    )
+    wizard.add_argument(
+        "--manifest-path",
+        type=Path,
+        default=Path(
+            os.environ.get("TB_PROVISIONING_PATH", DEFAULT_MANIFEST_PATH)
+        ),
+    )
+    wizard.add_argument(
+        "--marker-path",
+        type=Path,
+        default=Path(os.environ.get("TB_SETUP_MARKER_PATH", DEFAULT_MARKER_PATH)),
+    )
+    wizard.add_argument("--windowed", action="store_true")
+
+    # No subcommand means the bridge, so the deployed unit needs no edit.
+    return parser.parse_args(argv if argv else ["run"])
+
+
+def _run_dashboard(arguments: argparse.Namespace) -> int:
+    # Imported here so a missing tkinter cannot stop the bridge from starting.
+    from .ui.dashboard import run as run_dashboard
+
+    return run_dashboard(arguments.snapshot_path, fullscreen=not arguments.windowed)
+
+
+def _run_wizard(arguments: argparse.Namespace) -> int:
+    from .ui.wizard import run as run_wizard
+
+    # Identity comes from the environment when it is readable, and otherwise
+    # from the snapshot the bridge publishes.
+    #
+    # That fallback is the normal path, not a corner case: the wizard autostarts
+    # inside the desktop session as an unprivileged user, and
+    # /etc/terrabyte-edge.env is root-owned 0640 because it holds the MQTT
+    # password. The snapshot is 0644 and already carries the same two values,
+    # having been loaded from that env by the bridge.
+    device_id = os.environ.get("TB_DEVICE_ID", "").strip()
+    claim_code = os.environ.get("TB_CLAIM_CODE", "").strip()
+
+    if not device_id or not claim_code:
+        from .state import read_snapshot
+
+        snapshot = read_snapshot(arguments.snapshot_path) or {}
+        device_id = device_id or str(snapshot.get("gateway_id", "")).strip()
+        claim_code = claim_code or str(snapshot.get("claim_code", "")).strip()
+
+    if not device_id:
+        print(
+            "configuration error: TB_DEVICE_ID is unset and no status snapshot "
+            f"was readable at {arguments.snapshot_path}",
+            file=sys.stderr,
+        )
+        return 2
+
+    return run_wizard(
+        device_id=device_id,
+        claim_code=claim_code,
+        snapshot_path=arguments.snapshot_path,
+        manifest_path=arguments.manifest_path,
+        marker_path=arguments.marker_path,
+        fullscreen=not arguments.windowed,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = _parse_args(sys.argv[1:] if argv is None else argv)
+    if arguments.command == "dashboard":
+        _configure_logging("INFO")
+        return _run_dashboard(arguments)
+    if arguments.command == "wizard":
+        _configure_logging("INFO")
+        return _run_wizard(arguments)
+
     try:
         settings = Settings.from_env()
     except ConfigError as exc:

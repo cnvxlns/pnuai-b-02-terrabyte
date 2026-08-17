@@ -1,0 +1,47 @@
+// TerraByte — let the kiosk operator join a Wi-Fi network without a password.
+//
+// Install to /etc/polkit-1/rules.d/50-terrabyte-network.rules (root:root 0644).
+// polkit 122 on the vendor image reads JavaScript rules from this directory;
+// the 50- prefix keeps it ahead of the distro defaults that would otherwise
+// answer `auth_admin_keep` first.
+//
+// Why this is needed: `nmcli general permissions` reports
+// org.freedesktop.NetworkManager.network-control = auth, so the wizard's Wi-Fi
+// step pops a polkit password dialog. The person standing in front of the
+// appliance is a grower at a greenhouse, not the account holder, and has no
+// password to type — the setup would dead-end there.
+//
+// TRADE-OFF, stated plainly: this lets ANY local member of `netdev` reconfigure
+// networking on this machine with no authentication. That is acceptable here
+// because the board is a single-purpose appliance with exactly one human-facing
+// account (orangepi) and physical access to it already means physical access to
+// the SD card. It is NOT acceptable on a shared or multi-user machine — do not
+// copy this file onto one.
+polkit.addRule(function (action, subject) {
+    if (!subject.isInGroup("netdev")) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    // subject.local && subject.active: only a session physically on this box's
+    // seat qualifies. An SSH login is neither, so remote access does not silently
+    // inherit the exemption.
+    if (!subject.local || !subject.active) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    switch (action.id) {
+    // Bring an interface up and attach it to a connection — the actual "join
+    // this network" click. This is the one that prompts today.
+    case "org.freedesktop.NetworkManager.network-control":
+    // List nearby SSIDs. Already permitted for netdev on this image; named
+    // explicitly so the rule does not quietly depend on that default.
+    case "org.freedesktop.NetworkManager.wifi.scan":
+    // Save the chosen SSID and PSK as a system connection, so the gateway
+    // reconnects by itself after a power cut with nobody present.
+    case "org.freedesktop.NetworkManager.settings.modify.system":
+        return polkit.Result.YES;
+    }
+
+    // Everything else — enabling/disabling networking wholesale, checkpoint
+    // rollback, hostname changes — keeps its default prompt.
+    return polkit.Result.NOT_HANDLED;
+});

@@ -199,5 +199,100 @@ class PotConfigTests(unittest.TestCase):
             )
 
 
+class MultiNodeConfigTests(unittest.TestCase):
+    """A gateway fronting up to four Arduinos.
+
+    Existing boards already have the singular variables in
+    /etc/terrabyte-edge.env, so both spellings must keep working.
+    """
+
+    def test_singular_variables_still_work(self) -> None:
+        settings = Settings.from_env(MQTT_ENV)
+        self.assertEqual(settings.serial_ports, ("/dev/serial/by-id/usb-test",))
+        self.assertEqual(settings.expected_node_ids, frozenset({"node-1"}))
+
+    def test_plural_variables_are_parsed(self) -> None:
+        settings = Settings.from_env(
+            dict(
+                MQTT_ENV,
+                TB_SERIAL_PORTS="/dev/a, /dev/b ,/dev/c",
+                TB_EXPECTED_NODE_IDS="node-1,node-2,node-3",
+            )
+        )
+        self.assertEqual(settings.serial_ports, ("/dev/a", "/dev/b", "/dev/c"))
+        self.assertEqual(
+            settings.expected_node_ids, frozenset({"node-1", "node-2", "node-3"})
+        )
+
+    def test_plural_wins_over_singular(self) -> None:
+        """A half-finished edit must not leave the plural list silently ignored."""
+
+        settings = Settings.from_env(
+            dict(
+                MQTT_ENV,
+                TB_SERIAL_PORTS="/dev/a,/dev/b",
+                TB_EXPECTED_NODE_IDS="node-1,node-2",
+            )
+        )
+        self.assertEqual(settings.serial_ports, ("/dev/a", "/dev/b"))
+
+    def test_more_than_four_ports_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "at most 4"):
+            Settings.from_env(
+                dict(
+                    MQTT_ENV,
+                    TB_SERIAL_PORTS="/dev/a,/dev/b,/dev/c,/dev/d,/dev/e",
+                    TB_EXPECTED_NODE_IDS="n1,n2,n3,n4",
+                )
+            )
+
+    def test_duplicate_entries_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "duplicates"):
+            Settings.from_env(dict(MQTT_ENV, TB_SERIAL_PORTS="/dev/a,/dev/a"))
+
+    def test_more_ports_than_nodes_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "more entries"):
+            Settings.from_env(
+                dict(MQTT_ENV, TB_SERIAL_PORTS="/dev/a,/dev/b,/dev/c")
+            )
+
+    def test_fewer_ports_than_nodes_is_allowed(self) -> None:
+        """Cabled for four pots, only two Arduinos powered on."""
+
+        settings = Settings.from_env(
+            dict(
+                MQTT_ENV,
+                TB_SERIAL_PORTS="/dev/a,/dev/b",
+                TB_EXPECTED_NODE_IDS="n1,n2,n3,n4",
+            )
+        )
+        self.assertEqual(len(settings.serial_ports), 2)
+        self.assertEqual(len(settings.expected_node_ids), 4)
+
+    def test_node_id_characters_are_validated(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "unsupported characters"):
+            Settings.from_env(
+                dict(MQTT_ENV, TB_EXPECTED_NODE_IDS="node-1,node with space")
+            )
+
+    def test_claim_code_must_be_six_digits(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "six digits"):
+            Settings.from_env(dict(MQTT_ENV, TB_CLAIM_CODE="48392"))
+        self.assertEqual(
+            Settings.from_env(dict(MQTT_ENV, TB_CLAIM_CODE="483920")).claim_code,
+            "483920",
+        )
+
+    def test_claim_code_is_optional(self) -> None:
+        self.assertEqual(Settings.from_env(MQTT_ENV).claim_code, "")
+
+    def test_snapshot_defaults_to_run_directory(self) -> None:
+        settings = Settings.from_env(MQTT_ENV)
+        self.assertEqual(
+            settings.status_snapshot_path,
+            Path("/run/terrabyte-edge/status.json"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

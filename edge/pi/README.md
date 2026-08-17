@@ -110,9 +110,11 @@ journalctl -u terrabyte-edge -f
 
 ## 설정
 
-필수 환경 변수는 `TB_SERIAL_PORT`, `TB_BACKEND_BASE_URL`,
-`TB_CROP_CONTEXT_ID`, `TB_DEVICE_ID`, `TB_EXPECTED_NODE_ID`와 인증 토큰입니다.
-serial의 `node_id`가 `TB_EXPECTED_NODE_ID`와 다르면 관측을 저장하지 않습니다.
+필수 환경 변수는 `TB_SERIAL_PORTS`, `TB_BACKEND_BASE_URL`,
+`TB_CROP_CONTEXT_ID`, `TB_DEVICE_ID`, `TB_EXPECTED_NODE_IDS`와 인증 토큰입니다.
+serial의 `node_id`가 `TB_EXPECTED_NODE_IDS` 목록에 없으면 관측을 저장하지 않습니다.
+단수형 `TB_SERIAL_PORT`·`TB_EXPECTED_NODE_ID`도 계속 인식하므로 기존 보드의 env는
+그대로 두어도 됩니다.
 토큰은
 `TB_DEVICE_TOKEN_FILE`을 권장하며, 개발할 때만 `TB_DEVICE_TOKEN`을 직접
 사용할 수 있습니다. 둘을 동시에 설정하면 시작을 거부합니다. 전체 기본값은
@@ -213,9 +215,160 @@ python -m venv .venv
 내보내기 단계는 학습 표본을 런타임 추론기로 재채점해 학습기와 확률이 일치하는지
 검사하고, 불일치하면 아티팩트를 쓰지 않습니다(train/serve skew 차단).
 
+## 화분 여러 개 연결하기
+
+게이트웨이 하나가 아두이노를 최대 4대까지 받습니다. 포트마다 읽기 스레드가 하나씩 돌고,
+어느 화분의 측정값인지는 **아두이노가 보내는 `node_id`로 판별합니다.** 포트 순서가 아닙니다.
+따라서 케이블을 다른 소켓으로 옮겨도 데이터 귀속은 바뀌지 않습니다.
+
+아두이노마다 `TelemetryConfig.local.h`의 `TB_NODE_ID`를 **서로 다르게** 굽고,
+그 값들을 `TB_EXPECTED_NODE_IDS`에 나열하세요.
+
+### 포트 경로 고르기 — CH340이면 `by-path`를 쓰세요
+
+`/dev/ttyUSB0` 같은 이름은 부팅 순서에 따라 바뀌므로 쓰지 않습니다. 안정적인 심볼릭 링크는
+두 종류가 있고, **USB-시리얼 칩에 따라 선택이 갈립니다.**
+
+| 경로 | 조건 | 주의 |
+|---|---|---|
+| `/dev/serial/by-id/` | 어댑터에 고유 시리얼 번호가 있을 때만 | CH340(`1a86`)에는 없습니다 |
+| `/dev/serial/by-path/` | 항상 유일 (물리 USB 포트 기준) | 케이블을 다른 소켓에 꽂으면 경로가 바뀝니다 |
+
+이름만 보면 구분됩니다. `usb-1a86_USB_Serial-if00-port0`에는 시리얼 번호가 없고,
+`usb-Arduino_Uno_A1B2C3-if00`에는 있습니다. **시리얼 번호가 없는 어댑터를 두 개 이상 꽂으면
+`by-id` 이름이 서로 겹쳐 한쪽만 살아남고 나머지 화분이 조용히 사라집니다.**
+
+```bash
+ls -l /dev/serial/by-id/ /dev/serial/by-path/
+```
+
+### 같은 펌웨어를 두 대에 구웠을 때
+
+가장 흔한 실수입니다. 같은 `node_id`가 두 포트에서 보이면 두 번째 포트를 `중복 노드` 오류로
+표시하고 그 측정값을 버립니다. 이걸 잡지 않으면 서로 다른 화분의 값이 한 이력에 섞여 들어가고도
+그럴듯해 보입니다. 화면에서 바로 확인할 수 있습니다.
+
+## 모니터 상태판
+
+모니터를 연결하면 화분 4개의 상태와 6자리 등록 번호가 전체화면으로 보입니다.
+
+```bash
+# 수동 실행
+python -m terrabyte_edge dashboard
+python -m terrabyte_edge dashboard --windowed     # 개발용 창 모드
+```
+
+부팅 시 자동 실행하려면 데스크톱 자동시작에 등록합니다.
+
+```bash
+sudo apt install python3-tk
+sudo cp deploy/terrabyte-dashboard.desktop /etc/xdg/autostart/
+```
+
+브릿지가 `/run/terrabyte-edge/status.json`에 1초마다 상태를 쓰고 상태판이 그걸 읽습니다.
+두 프로세스는 완전히 분리되어 있어 **상태판이 죽어도 텔레메트리는 영향받지 않습니다.**
+스냅샷이 8초 이상 낡으면 상태판이 "브리지 서비스 응답 없음"을 띄웁니다 — 죽은 값을 살아 있는
+것처럼 보여주지 않기 위해서입니다.
+
+> 텍스트 콘솔(tty)이 아니라 데스크톱 세션 안에서 돕니다. 리눅스 콘솔 폰트는 글리프 512개가
+> 상한이라 한글이 렌더링되지 않고, Orange Pi 이미지는 `graphical.target`으로 부팅해
+> lightdm이 이미 tty1을 쓰고 있습니다.
+
+## 최초 설정 마법사
+
+처음 켠 게이트웨이는 상태판보다 먼저 설정 마법사를 전체화면으로 띄웁니다.
+네 단계이며, 각 단계는 앞 단계가 끝나야 넘어갑니다.
+
+1. **아두이노 확인** — 기대하는 `node_id`가 실제로 들어오는지 봅니다.
+2. **와이파이** — 주변 SSID를 훑고 비밀번호를 받아 접속합니다.
+3. **신원 확인** — 공장 매니페스트와 백엔드가 아는 값이 같은지 확인합니다.
+4. **등록 번호** — 앱에서 입력할 6자리 번호를 보여줍니다.
+
+```bash
+# 수동 실행
+python -m terrabyte_edge wizard
+python -m terrabyte_edge wizard --windowed     # 개발용 창 모드
+```
+
+### 설치
+
+```bash
+sudo cp deploy/terrabyte-wizard.desktop /etc/xdg/autostart/
+sudo cp deploy/50-terrabyte-network.rules /etc/polkit-1/rules.d/
+sudo install -d -m 0755 /etc/terrabyte-edge
+sudo install -o root -g root -m 0444 deploy/provisioning.json.example \
+  /etc/terrabyte-edge/provisioning.json
+sudoedit /etc/terrabyte-edge/provisioning.json
+```
+
+매니페스트는 **root 소유 0444**입니다. 게이트웨이 프로세스도 사용자도 고쳐 쓸 수
+없어야 신원 확인이 의미가 있습니다 — 스스로 고칠 수 있는 값과 비교하는 검사는
+검사가 아닙니다.
+
+| 필드 | 뜻 |
+|---|---|
+| `device_id` | 게이트웨이 식별자. MQTT 토픽의 `{gatewayId}`와 같습니다 |
+| `claim_code` | 앱에서 입력하는 6자리 등록 번호 |
+| `mqtt_username` | 브로커 계정. ACL이 이 계정을 `device_id` 네임스페이스에 묶습니다 |
+| `provisioned_at` | 공장에서 이미지를 구운 UTC 시각. 진단용이며 비교에는 쓰지 않습니다 |
+
+polkit 규칙은 와이파이 단계에서 비밀번호 창이 뜨지 않게 합니다. NetworkManager의
+`network-control`이 기본 `auth`라서, 규칙이 없으면 앞에 서 있는 사용자가 입력할 수
+없는 관리자 비밀번호를 요구하며 설정이 그 자리에서 멈춥니다. 대신 **로컬
+`netdev` 구성원 누구나 이 보드의 네트워크를 인증 없이 바꿀 수 있게 됩니다.**
+단일 목적 기기라 받아들이는 위험이며, 공용 머신에는 이 파일을 넣지 마세요.
+
+### 신원 확인이 필요한 이유
+
+SD 카드 이미지를 복제해 두 번째 보드를 만들면 매니페스트의 등록 번호까지 그대로
+따라옵니다. 확인이 없으면 새 보드가 **다른 게이트웨이의 등록 번호**를 화면에
+띄우고, 사용자는 그 번호로 남의 기기를 자기 계정에 등록합니다. 이후 들어오는
+측정값은 전부 엉뚱한 화분에 붙고, 값 자체는 정상으로 보이기 때문에 아무도
+알아차리지 못합니다.
+
+불일치면 마법사는 빨간 화면에서 멈추고 **완료 표시 파일을 쓰지 않습니다.** 다음
+부팅에서 다시 뜨므로, 잘못된 번호가 화면에 남는 상태로 넘어갈 수 없습니다.
+
+### 오프라인일 때
+
+백엔드에 닿지 못하면 `failed`가 아니라 `unverified`입니다. 노란 안내를 함께
+띄우되 **등록 번호는 그대로 보여줍니다.** 복제 이미지의 위험보다 행사장 와이파이가
+죽었다는 이유로 시연 자체가 막히는 쪽이 더 나쁘기 때문입니다. 이때도 완료 표시는
+남으므로, 나중에 문제가 의심되면 아래 절차로 다시 돌립니다.
+
+### 다시 실행하기
+
+```bash
+sudo rm /var/lib/terrabyte-edge/setup-complete
+sudo reboot
+```
+
+재부팅 없이 확인만 할 때는 데스크톱 세션에서 직접 실행합니다.
+
+```bash
+python -m terrabyte_edge wizard --windowed
+```
+
+### 와이파이 단계 수동 확인
+
+**SSH로는 검증할 수 없습니다.** 다른 네트워크에 붙는 순간 SSH 세션이 끊기고,
+그러면 실패인지 성공했는데 연결만 바뀐 것인지 구분할 수 없습니다. 모니터와
+키보드를 보드에 직접 연결하고 확인하세요.
+
+1. 유선을 뽑고 부팅해 마법사가 와이파이 단계에서 멈추는지 본다.
+2. 목록에 주변 SSID가 뜨는지 (스캔 권한 확인).
+3. 비밀번호를 넣고 접속할 때 **polkit 비밀번호 창이 뜨지 않는지** — 뜨면 규칙이
+   적용되지 않은 것이다. `pkaction --action-id
+   org.freedesktop.NetworkManager.network-control --verbose`로 확인한다.
+4. 틀린 비밀번호를 넣어 실패 메시지가 뜨고 같은 단계에 머무는지.
+5. 접속 후 `nmcli connection show` 결과에 저장된 연결이 남는지 (`autoconnect`가
+   yes여야 정전 후 사람 없이 복구된다).
+6. 전원을 뺐다 켜서 자동으로 같은 SSID에 붙고, 마법사가 다시 뜨지 않는지.
+
 ## 테스트
 
-테스트에는 외부 서버, serial 장치, pyserial이 필요하지 않습니다.
+테스트에는 외부 서버, serial 장치, pyserial, 화면이 필요하지 않습니다.
+표시 로직은 순수 함수로 분리되어 있어 Tk 없이 검증합니다.
 
 ```bash
 cd edge/pi

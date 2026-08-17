@@ -9,6 +9,12 @@ from terrabyte_edge.publisher import Delivery, DeliveryResult
 from terrabyte_edge.service import BridgeService
 
 
+# ``_ingest_line`` takes the port the line arrived on so a fault can be shown
+# against the right cable. Which port is irrelevant to these tests, but it has
+# to be a real string: GatewayState keys its per-port records by it.
+PORT = "/dev/serial/by-id/usb-test"
+
+
 def event(event_id: str) -> Event:
     return Event(
         event_id=event_id,
@@ -72,12 +78,15 @@ class ServiceTests(unittest.TestCase):
         settings = SimpleNamespace(
             upload_batch_size=20,
             http_timeout_seconds=1.0,
+            device_id="orangepi-test",
+            claim_code="483920",
+            transport="mqtt",
         )
         service = BridgeService(
             settings,
             outbox=outbox,
             publisher=publisher,
-            serial_reader=object(),
+            serial_readers=[],
         )
 
         self.assertEqual(service._upload_once(), 1)
@@ -91,20 +100,19 @@ class ServiceTests(unittest.TestCase):
         settings = SimpleNamespace(
             upload_batch_size=20,
             http_timeout_seconds=1.0,
+            device_id="orangepi-test",
+            claim_code="483920",
+            transport="mqtt",
         )
         service = BridgeService(
             settings,
             outbox=outbox,
             publisher=publisher,
-            serial_reader=object(),
+            serial_readers=[],
         )
 
         service.join()
         self.assertTrue(publisher.closed)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class IrrigationSuggestionWiringTests(unittest.TestCase):
@@ -122,8 +130,11 @@ class IrrigationSuggestionWiringTests(unittest.TestCase):
             upload_batch_size=20,
             http_timeout_seconds=1.0,
             crop_context_id="ctx-1",
-            expected_node_id="node-1",
+            expected_node_ids=frozenset({"node-1"}),
             clock_minimum_utc=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            device_id="orangepi-test",
+            claim_code="483920",
+            transport="mqtt",
             pot_substrate_ml=volumes or {},
             pot_crop_codes=crops or {},
             substrate_volume_ml_for=lambda node: (volumes or {}).get(node),
@@ -134,7 +145,7 @@ class IrrigationSuggestionWiringTests(unittest.TestCase):
             settings,
             outbox=outbox,
             publisher=SimpleNamespace(close=lambda: None),
-            serial_reader=object(),
+            serial_readers=[],
         )
         return service, outbox
 
@@ -160,7 +171,7 @@ class IrrigationSuggestionWiringTests(unittest.TestCase):
         service, outbox = self.build(
             volumes={"node-1": 3000}, crops={"node-1": "lettuce"}
         )
-        service._ingest_line(self.line())
+        service._ingest_line(PORT, self.line())
 
         suggestion = outbox.events[0].irrigation_suggestion
         self.assertIsNotNone(suggestion)
@@ -173,7 +184,7 @@ class IrrigationSuggestionWiringTests(unittest.TestCase):
         the backend's fallback table exists for exactly this case."""
 
         service, outbox = self.build(crops={"node-1": "lettuce"})
-        service._ingest_line(self.line())
+        service._ingest_line(PORT, self.line())
 
         self.assertIsNone(outbox.events[0].irrigation_suggestion)
 
@@ -181,7 +192,7 @@ class IrrigationSuggestionWiringTests(unittest.TestCase):
         service, outbox = self.build(
             volumes={"node-1": 3000}, crops={"node-1": "lettuce"}
         )
-        service._ingest_line(self.line())
+        service._ingest_line(PORT, self.line())
 
         node = outbox.events[0].envelope_v2(gateway_id="gw-1")["nodes"][0]
         self.assertIn("irrigation_suggestion", node)
@@ -195,3 +206,7 @@ class RecordingOutbox:
     def enqueue(self, event):
         self.events.append(event)
         return True
+
+
+if __name__ == "__main__":
+    unittest.main()

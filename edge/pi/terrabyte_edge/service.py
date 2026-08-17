@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import logging
 from threading import Event, Thread
+from typing import Sequence
 
 from .backend import HttpPublisher
 from .config import Settings
@@ -18,10 +19,12 @@ from .protocol import (
     IrrigationSuggestion,
     NonTelemetryMessage,
     ProtocolError,
+    UnknownNodeError,
     parse_line,
 )
 from .publisher import Delivery, Publisher
 from .serial_reader import SerialLineReader
+from .state import GatewayState, write_snapshot
 
 
 LOGGER = logging.getLogger(__name__)
@@ -56,7 +59,8 @@ class BridgeService:
         *,
         outbox: Outbox | None = None,
         publisher: Publisher | None = None,
-        serial_reader: SerialLineReader | None = None,
+        serial_readers: Sequence[SerialLineReader] | None = None,
+        state: GatewayState | None = None,
     ) -> None:
         self.settings = settings
         self.stop_event = Event()
@@ -67,25 +71,58 @@ class BridgeService:
             max_rows=settings.outbox_max_rows,
         )
         self.publisher = publisher or _build_publisher(settings)
-        self.serial_reader = serial_reader or SerialLineReader(
-            port=settings.serial_port,
-            baudrate=settings.serial_baud,
-            timeout_seconds=settings.serial_timeout_seconds,
-            reconnect_seconds=settings.serial_reconnect_seconds,
-            max_line_bytes=settings.serial_max_line_bytes,
+        self.serial_readers = list(serial_readers) if serial_readers is not None else [
+            SerialLineReader(
+                port=port,
+                baudrate=settings.serial_baud,
+                timeout_seconds=settings.serial_timeout_seconds,
+                reconnect_seconds=settings.serial_reconnect_seconds,
+                max_line_bytes=settings.serial_max_line_bytes,
+            )
+            for port in settings.serial_ports
+        ]
+        self.state = state or GatewayState(
+            gateway_id=settings.device_id,
+            claim_code=settings.claim_code,
+            transport=settings.transport,
+            ports=tuple(reader.port for reader in self.serial_readers),
         )
         self._threads: list[Thread] = []
+        # Ingest threads are tracked separately from the uploader: one dead
+        # port must not take the gateway down while three pots keep reporting.
+        self._critical_threads: list[Thread] = []
 
     def start(self) -> None:
         self.outbox.initialize()
         pending, dead = self.outbox.counts()
         LOGGER.info("outbox ready pending=%d dead=%d", pending, dead)
-        self._threads = [
-            Thread(target=self._ingest_loop, name="serial-ingest", daemon=True),
-            Thread(target=self._upload_loop, name="backend-upload", daemon=True),
+        self.state.record_outbox(pending=pending, dead=dead)
+
+        uploader = Thread(target=self._upload_loop, name="backend-upload", daemon=True)
+        # The snapshot writer is its own thread rather than a tick inside the
+        # uploader. The uploader blocks for up to the publish timeout on a dead
+        # broker, which is exactly the moment somebody walks over and plugs a
+        # monitor in; a frozen display then would hide the one fact they need.
+        snapshotter = Thread(target=self._snapshot_loop, name="status-snapshot", daemon=True)
+        self._critical_threads = [uploader, snapshotter]
+
+        ingest_threads = [
+            Thread(
+                target=self._ingest_loop,
+                args=(reader,),
+                name=f"serial-ingest-{index}",
+                daemon=True,
+            )
+            for index, reader in enumerate(self.serial_readers)
         ]
+        self._threads = ingest_threads + self._critical_threads
         for thread in self._threads:
             thread.start()
+        LOGGER.info(
+            "bridge started ports=%d nodes=%s",
+            len(self.serial_readers),
+            ",".join(sorted(self.settings.expected_node_ids)),
+        )
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -98,13 +135,28 @@ class BridgeService:
         self.publisher.close()
 
     def worker_failed(self) -> bool:
-        return bool(self._threads) and any(
-            not thread.is_alive() for thread in self._threads
+        """Only the uploader and the snapshot writer are fatal.
+
+        An ingest thread that exits has lost one Arduino. Restarting the whole
+        process for that would drop the other three pots and empty nothing from
+        the outbox — the port is marked down and the display says so instead.
+        """
+
+        return bool(self._critical_threads) and any(
+            not thread.is_alive() for thread in self._critical_threads
         )
 
-    def _ingest_loop(self) -> None:
-        for line in self.serial_reader.lines(self.stop_event):
-            self._ingest_line(line)
+    def _snapshot_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                pending, dead = self.outbox.counts()
+                self.state.record_outbox(pending=pending, dead=dead)
+                write_snapshot(self.settings.status_snapshot_path, self.state.snapshot())
+            except OSError as exc:
+                # A snapshot is a convenience for whoever is looking at the
+                # screen; failing to write one must never stop telemetry.
+                LOGGER.warning("status snapshot write failed reason=%s", exc)
+            self.stop_event.wait(self.settings.status_snapshot_seconds)
 
     def _suggest_irrigation(
         self, event: TelemetryEvent
@@ -146,20 +198,49 @@ class BridgeService:
             assumed_substrate_volume_ml=substrate_volume_ml,
         )
 
-    def _ingest_line(self, line: bytes) -> None:
+    def _ingest_loop(self, reader: SerialLineReader) -> None:
+        try:
+            for line in reader.lines(self.stop_event):
+                self._ingest_line(reader.port, line)
+        finally:
+            self.state.record_link(reader.port, up=False)
+
+    def _ingest_line(self, port: str, line: bytes) -> None:
         try:
             event = parse_line(
                 line,
                 context_id=self.settings.crop_context_id,
-                expected_node_id=self.settings.expected_node_id,
+                allowed_node_ids=self.settings.expected_node_ids,
                 clock_minimum_utc=self.settings.clock_minimum_utc,
             )
+        except UnknownNodeError as exc:
+            LOGGER.warning(
+                "discarding telemetry from unlisted node port=%s node_id=%s",
+                port,
+                exc.node_id,
+            )
+            self.state.record_unknown_node(port, exc.node_id)
+            self.state.add_event("warn", f"알 수 없는 노드 {exc.node_id}")
+            return
         except NonTelemetryMessage as exc:
-            LOGGER.info("arduino status message type=%s", exc)
+            LOGGER.info(
+                "arduino status message port=%s type=%s", port, exc.message_type
+            )
+            if exc.node_id:
+                self.state.record_announcement(port, exc.node_id)
             return
         except ProtocolError as exc:
-            LOGGER.warning("discarding invalid telemetry reason=%s", exc)
+            LOGGER.warning(
+                "discarding invalid telemetry port=%s reason=%s", port, exc
+            )
+            self.state.record_error(port)
             return
+        # The display is fed before sizing: ``record_frame`` reads only
+        # ``measurements()``, which a suggestion cannot change, so the screen
+        # never waits on the irrigation path.
+        self.state.record_frame(
+            port, node_id=event.node_id, measurements=event.measurements()
+        )
         # Computed before the row is queued so the suggestion is durable with
         # the reading that produced it. Sizing at upload time instead would let
         # a config change between capture and delivery attach a volume to a
@@ -171,6 +252,7 @@ class BridgeService:
             LOGGER.critical(
                 "telemetry dropped because durable outbox is full reason=%s", exc
             )
+            self.state.add_event("error", "저장 큐가 가득 차 측정값을 버렸습니다")
             return
         if enqueued:
             LOGGER.info(
@@ -197,6 +279,7 @@ class BridgeService:
             event_id = item.event.event_id
             if result.outcome is Delivery.DELIVERED:
                 self.outbox.mark_delivered(event_id)
+                self.state.record_delivery()
                 LOGGER.info("telemetry delivered event_id=%s", event_id)
             elif result.outcome is Delivery.RETRY:
                 delay = self.outbox.mark_retry(
@@ -205,6 +288,7 @@ class BridgeService:
                     result.reason,
                     result.retry_after_seconds,
                 )
+                self.state.record_transport(connected=False, error=result.reason)
                 LOGGER.warning(
                     "telemetry retry event_id=%s reason=%s delay_seconds=%.1f",
                     event_id,
@@ -216,6 +300,7 @@ class BridgeService:
                 break
             else:
                 self.outbox.mark_dead(event_id, result.reason)
+                self.state.add_event("error", f"측정값 폐기: {result.reason}")
                 LOGGER.error(
                     "telemetry quarantined event_id=%s reason=%s",
                     event_id,
