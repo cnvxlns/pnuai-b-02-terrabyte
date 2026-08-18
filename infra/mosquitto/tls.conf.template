@@ -1,0 +1,18 @@
+# TLS 리스너 조각 설정 — 이 파일 자체는 mosquitto가 직접 읽지 않는다.
+#
+# docker-entrypoint.sh 가 컨테이너 기동 시 infra/mosquitto/certs/ 아래에
+# ca.crt / server.crt / server.key 가 모두 있는지 확인하고, 있을 때만 이 파일을
+# /mosquitto/config/runtime/conf.d/tls.conf 로 복사한다. mosquitto.conf 의
+# `include_dir /mosquitto/config/runtime/conf.d` 가 그 결과를 불러온다.
+# 인증서가 없으면 이 파일은 복사되지 않고, 8883 리스너 없이 1883 평문
+# 리스너만으로 정상 기동한다 (mosquitto.conf 최상단 주석 참고).
+#
+# 1883 플레인텍스트 리스너는 그대로 유지한다 — Orange Pi 게이트웨이가 지금
+# 1883으로 붙어 있고 이를 깨면 안 된다. TLS는 "추가" 리스너다.
+listener 8883
+cafile /mosquitto/certs/ca.crt
+certfile /mosquitto/certs/server.crt
+keyfile /mosquitto/certs/server.key
+
+# password_file / acl_file / allow_anonymous 는 mosquitto.conf 최상위(전역)
+# 설정이라 리스너별로 다시 지정할 필요가 없다 — 8883도 1883과 동일한 인증/ACL을 쓴다.
