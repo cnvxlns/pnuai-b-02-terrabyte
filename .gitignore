@@ -67,3 +67,7 @@ docs/superpowers/
 
 # 합성 벤치 캡처는 tools/make_bench_capture.py로 재생성한다.
 edge/pi/data/raw/
+
+# TLS 인증서는 infra/mosquitto/generate-certs.sh 로 각자 만든다.
+# ca.key / server.key 가 여기 생기므로 저장소에 절대 들어가면 안 된다.
+infra/mosquitto/certs/
