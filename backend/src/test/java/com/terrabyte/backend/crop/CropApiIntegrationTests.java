@@ -109,6 +109,30 @@ class CropApiIntegrationTests {
     }
 
     @Test
+    void potResponseExposesCropSelectionTimestampAfterSelection() throws Exception {
+        String token = signupAndGetToken("pot-crop-owner@example.com");
+        long deviceId = registerAndGetDeviceId(token);
+        long potId = jdbcTemplate.queryForObject(
+                "SELECT id FROM pot WHERE device_id = ? ORDER BY id LIMIT 1", Long.class, deviceId);
+
+        mockMvc.perform(get("/api/pots/{potId}", potId)
+                        .header("Authorization", bearer(token)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.cropCode").doesNotExist())
+                .andExpect(jsonPath("$.cropSelectedAt").doesNotExist());
+
+        selectPot(token, potId, "basil")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.selectedAt").isNotEmpty());
+
+        mockMvc.perform(get("/api/pots/{potId}", potId)
+                        .header("Authorization", bearer(token)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.cropCode").value("basil"))
+                .andExpect(jsonPath("$.cropSelectedAt").isNotEmpty());
+    }
+
+    @Test
     void rejectsUnknownCropAndADeviceOwnedByAnotherUser() throws Exception {
         String ownerToken = signupAndGetToken("crop-owner@example.com");
         long deviceId = registerAndGetDeviceId(ownerToken);
@@ -139,6 +163,14 @@ class CropApiIntegrationTests {
     private org.springframework.test.web.servlet.ResultActions select(
             String token, long deviceId, String cropCode) throws Exception {
         return mockMvc.perform(patch("/api/devices/{deviceId}/crop", deviceId)
+                .header("Authorization", bearer(token))
+                .contentType(APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new CropSelectionRequest(cropCode))));
+    }
+
+    private org.springframework.test.web.servlet.ResultActions selectPot(
+            String token, long potId, String cropCode) throws Exception {
+        return mockMvc.perform(patch("/api/pots/{potId}/crop", potId)
                 .header("Authorization", bearer(token))
                 .contentType(APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(new CropSelectionRequest(cropCode))));
