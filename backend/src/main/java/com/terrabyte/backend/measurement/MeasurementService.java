@@ -105,6 +105,7 @@ public class MeasurementService {
                         deviceRepository.markOnline(device.id(), clock.instant());
                     } else {
                         deviceRepository.markOffline(device.id(), clock.instant());
+                        potRepository.markOfflineByDevice(device.id());
                     }
                     LOGGER.info("gateway presence gateway_id={} online={}", gatewayId, online);
                 },

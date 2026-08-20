@@ -106,6 +106,18 @@ public class PotRepository {
                 potId);
     }
 
+    /**
+     * Driven by the MQTT last will when a gateway's connection drops.
+     *
+     * <p>{@code last_seen_at} is deliberately left alone: it records when each
+     * pot was last heard from, and overwriting it when the gateway disconnect
+     * is detected would erase that.
+     */
+    public void markOfflineByDevice(long deviceId) {
+        jdbcTemplate.update(
+                "UPDATE pot SET status = 'OFFLINE' WHERE device_id = ?", deviceId);
+    }
+
     public int selectCrop(long potId, String cropCode, Instant selectedAt) {
         return jdbcTemplate.update(
                 "UPDATE pot SET crop_code = ?, crop_selected_at = ? WHERE id = ?",

@@ -1,5 +1,6 @@
 package com.terrabyte.backend.measurement;
 
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -87,6 +88,29 @@ class MeasurementServiceIngestTests {
                 HARDWARE_ID);
         assertThat(nodeId).isEqualTo("node-from-envelope");
         verify(measurementStore).write(any(TelemetrySample.class));
+    }
+
+    @Test
+    void marksGatewayPotsOfflineWithoutChangingTheirLastSeenAt() {
+        Instant lastSeenAt = Instant.parse("2026-07-21T04:05:06Z");
+        Long deviceId = jdbcTemplate.queryForObject(
+                "SELECT id FROM device WHERE hardware_id = ?", Long.class, HARDWARE_ID);
+        jdbcTemplate.update(
+                "UPDATE pot SET status = 'ONLINE', last_seen_at = ? WHERE device_id = ?",
+                Timestamp.from(lastSeenAt),
+                deviceId);
+
+        measurementService.updateGatewayPresence(HARDWARE_ID, true);
+        measurementService.updateGatewayPresence(HARDWARE_ID, false);
+
+        List<String> statuses = jdbcTemplate.queryForList(
+                "SELECT status FROM pot WHERE device_id = ?", String.class, deviceId);
+        List<Instant> lastSeenAts = jdbcTemplate.query(
+                "SELECT last_seen_at FROM pot WHERE device_id = ?",
+                (resultSet, rowNumber) -> resultSet.getTimestamp("last_seen_at").toInstant(),
+                deviceId);
+        assertThat(statuses).isNotEmpty().containsOnly("OFFLINE");
+        assertThat(lastSeenAts).containsOnly(lastSeenAt);
     }
 
     private TelemetryEnvelope envelope(String gatewayId, String nodeId, String eventId) {
