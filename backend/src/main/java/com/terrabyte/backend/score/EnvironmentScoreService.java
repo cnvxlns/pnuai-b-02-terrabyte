@@ -73,13 +73,11 @@ public class EnvironmentScoreService {
                 "plantLight", "광량", "μmol/m²/s", sample.plantLightPpfdUmolM2S(),
                 profile.ppfdZeroLow(), profile.ppfdOptimalLow(),
                 profile.ppfdOptimalHigh(), profile.ppfdZeroHigh());
-        double total = calculator.overall(
-                temperature.score(),
-                humidity.score(),
-                light.score(),
-                profile.temperatureExponent(),
-                profile.humidityExponent(),
-                profile.plantLightExponent());
+        double total = totalFor(
+                profile,
+                sample.airTemperatureC(),
+                sample.airHumidityPct(),
+                sample.plantLightPpfdUmolM2S());
         List<EnvironmentScoreResponse.Factor> factors = new ArrayList<>(List.of(temperature, humidity, light));
         if (sample.soilSensorValid()) {
             factors.add(factor(
@@ -103,6 +101,57 @@ public class EnvironmentScoreService {
                 sample.observedAt(),
                 formula(profile),
                 factors);
+    }
+
+    /**
+     * 모든 지표를 최적값으로 옮기면 항상 100점이 되어 의미가 없으므로, 사용자가 실제로 조절할 수 있는
+     * 습도와 광량만 보정되었다고 가정한다. 최적 범위의 중간값이 아닌 가장 가까운 경계로 옮겨 최소한의
+     * 충분한 조치를 모델링하며, 온도는 측정값을 그대로 유지한다.
+     */
+    public EnvironmentScorePotentialResponse potential(long userId, long potId) {
+        Pot pot = potRepository.findOwned(potId, userId)
+                .orElseThrow(() -> notFound("POT_NOT_FOUND", "화분을 찾을 수 없습니다."));
+        TelemetrySample sample = measurementStore.findLatest(pot.id())
+                .orElseThrow(() -> notFound("MEASUREMENT_NOT_FOUND", "아직 수신된 측정 데이터가 없습니다."));
+        if (pot.cropCode() == null) {
+            throw notFound("CROP_NOT_SELECTED", "환경 적합도를 계산할 작물을 먼저 선택해 주세요.");
+        }
+        if (!sample.airSensorValid() || !sample.lightSensorValid()) {
+            throw new ApiException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "INVALID_SCORE_INPUT",
+                    "온도·습도·광량 센서값이 모두 유효해야 점수를 계산할 수 있습니다.");
+        }
+        CropScoreProfile profile = profileRepository.findActiveByCropCode(pot.cropCode())
+                .orElseThrow(() -> notFound("CROP_PROFILE_NOT_FOUND", "작물 점수 기준을 찾을 수 없습니다."));
+
+        double humidity = nearestOptimalBoundary(
+                sample.airHumidityPct(),
+                profile.humidityOptimalLow(),
+                profile.humidityOptimalHigh());
+        double plantLight = nearestOptimalBoundary(
+                sample.plantLightPpfdUmolM2S(),
+                profile.ppfdOptimalLow(),
+                profile.ppfdOptimalHigh());
+        List<EnvironmentScorePotentialResponse.ImprovedFactor> improvedFactors = new ArrayList<>();
+        if (Double.compare(humidity, sample.airHumidityPct()) != 0) {
+            improvedFactors.add(new EnvironmentScorePotentialResponse.ImprovedFactor(
+                    "humidity", "습도", sample.airHumidityPct(), humidity));
+        }
+        if (Double.compare(plantLight, sample.plantLightPpfdUmolM2S()) != 0) {
+            improvedFactors.add(new EnvironmentScorePotentialResponse.ImprovedFactor(
+                    "plantLight", "광량", sample.plantLightPpfdUmolM2S(), plantLight));
+        }
+
+        double current = totalFor(
+                profile,
+                sample.airTemperatureC(),
+                sample.airHumidityPct(),
+                sample.plantLightPpfdUmolM2S());
+        double potential = totalFor(profile, sample.airTemperatureC(), humidity, plantLight);
+        double delta = Math.round((potential - current) * 10.0) / 10.0;
+        return new EnvironmentScorePotentialResponse(
+                pot.id(), current, potential, delta, improvedFactors);
     }
 
     public List<CropRecommendationResponse> cropRecommendations(long userId, long potId) {
@@ -167,9 +216,11 @@ public class EnvironmentScoreService {
                 "plantLight", "광량", "μmol/m²/s", sample.plantLightPpfdUmolM2S(),
                 profile.ppfdZeroLow(), profile.ppfdOptimalLow(),
                 profile.ppfdOptimalHigh(), profile.ppfdZeroHigh());
-        double total = calculator.overall(
-                temperature.score(), humidity.score(), light.score(),
-                profile.temperatureExponent(), profile.humidityExponent(), profile.plantLightExponent());
+        double total = totalFor(
+                profile,
+                sample.airTemperatureC(),
+                sample.airHumidityPct(),
+                sample.plantLightPpfdUmolM2S());
         String issues = List.of(temperature, humidity, light).stream()
                 .filter(factor -> !factor.status().equals("OK"))
                 .map(EnvironmentScoreResponse.Factor::label)
@@ -195,9 +246,11 @@ public class EnvironmentScoreService {
                 "plantLight", "광량", "μmol/m²/s", sample.plantLightPpfdUmolM2S(),
                 profile.ppfdZeroLow(), profile.ppfdOptimalLow(),
                 profile.ppfdOptimalHigh(), profile.ppfdZeroHigh());
-        double total = calculator.overall(
-                temperature.score(), humidity.score(), light.score(),
-                profile.temperatureExponent(), profile.humidityExponent(), profile.plantLightExponent());
+        double total = totalFor(
+                profile,
+                sample.airTemperatureC(),
+                sample.airHumidityPct(),
+                sample.plantLightPpfdUmolM2S());
         EnvironmentScoreResponse.Factor limitingFactor = List.of(temperature, humidity, light).stream()
                 .min(Comparator.comparingDouble(EnvironmentScoreResponse.Factor::score))
                 .orElse(temperature);
@@ -251,6 +304,44 @@ public class EnvironmentScoreService {
                 status,
                 Math.round(gap * 10.0) / 10.0,
                 calculator.factor(current, zeroLow, optimalLow, optimalHigh, zeroHigh));
+    }
+
+    private double totalFor(
+            CropScoreProfile profile,
+            double temperatureC,
+            double humidityPct,
+            double ppfd) {
+        double temperatureScore = calculator.factor(
+                temperatureC,
+                profile.temperatureZeroLow(),
+                profile.temperatureOptimalLow(),
+                profile.temperatureOptimalHigh(),
+                profile.temperatureZeroHigh());
+        double humidityScore = calculator.factor(
+                humidityPct,
+                profile.humidityZeroLow(),
+                profile.humidityOptimalLow(),
+                profile.humidityOptimalHigh(),
+                profile.humidityZeroHigh());
+        double plantLightScore = calculator.factor(
+                ppfd,
+                profile.ppfdZeroLow(),
+                profile.ppfdOptimalLow(),
+                profile.ppfdOptimalHigh(),
+                profile.ppfdZeroHigh());
+        return calculator.overall(
+                temperatureScore,
+                humidityScore,
+                plantLightScore,
+                profile.temperatureExponent(),
+                profile.humidityExponent(),
+                profile.plantLightExponent());
+    }
+
+    private double nearestOptimalBoundary(double value, double optimalLow, double optimalHigh) {
+        if (value < optimalLow) return optimalLow;
+        if (value > optimalHigh) return optimalHigh;
+        return value;
     }
 
     private String grade(double total) {

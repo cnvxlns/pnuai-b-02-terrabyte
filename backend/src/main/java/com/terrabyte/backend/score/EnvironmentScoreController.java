@@ -32,6 +32,13 @@ public class EnvironmentScoreController {
         return service.latest(Long.parseLong(jwt.getSubject()), potId);
     }
 
+    @GetMapping("/pots/{potId}/score/potential")
+    public EnvironmentScorePotentialResponse potential(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable long potId) {
+        return service.potential(Long.parseLong(jwt.getSubject()), potId);
+    }
+
     @GetMapping("/pots/{potId}/crop-recommendations")
     public java.util.List<CropRecommendationResponse> cropRecommendations(
             @AuthenticationPrincipal Jwt jwt,
