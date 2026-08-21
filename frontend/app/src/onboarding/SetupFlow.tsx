@@ -10,11 +10,13 @@ import { BrandMark } from '../components/BrandMark';
 import { Surface } from '../components/Surface';
 import { getCrops, selectPotCrop, type CropResponse } from '../crop/cropApi';
 import { crops } from '../data';
-import { registerDevice, type DeviceResponse } from '../device/deviceApi';
+import { getDevice, registerDevice, type DeviceResponse } from '../device/deviceApi';
 import type { FlowStage } from '../navigation/types';
 import { createCultivationSpace, getCultivationSpaces, type CultivationSpaceResponse } from '../space/spaceApi';
 
 type AreaUnit = 'SQUARE_METERS' | 'PYEONG';
+
+const DEVICE_CONNECTION_POLL_MS = 3000;
 
 const spaceTypeOptions = [
   { label: '건물 옥상', value: '건물 옥상' },
@@ -249,14 +251,31 @@ export function SetupFlow({
     };
   }, [stage]);
 
+  // 연결 여부는 기기가 실제로 텔레메트리를 보냈는지로만 판단한다. 예전에는 1.8초 타이머로
+  // 무조건 "연결 완료"를 띄웠는데, 전원조차 켜지 않은 사용자에게도 성공이라고 말하는
+  // 화면이었다. device.status는 게이트웨이의 MQTT 접속/차단 유언으로 갱신되므로
+  // 그대로 신뢰할 수 있다.
   useEffect(() => {
-    if (stage !== 'setup') {
-      setConnected(false);
-      return undefined;
-    }
-    const timer = setTimeout(() => setConnected(true), 1800);
-    return () => clearTimeout(timer);
-  }, [stage]);
+    setConnected(false);
+    if (stage !== 'setup' || deviceId === undefined) return undefined;
+
+    let active = true;
+    const check = () =>
+      getDevice(deviceId)
+        .then((device) => {
+          if (active && device.status === 'ONLINE') setConnected(true);
+        })
+        .catch(() => {
+          // 대기 화면에서는 일시적인 조회 실패를 노출하지 않는다 — 다음 폴링에서 회복된다.
+        });
+
+    void check();
+    const interval = setInterval(() => void check(), DEVICE_CONNECTION_POLL_MS);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [stage, deviceId]);
 
   useEffect(() => {
     if (stage !== 'crop') return undefined;
@@ -411,7 +430,6 @@ export function SetupFlow({
               <View style={styles.registrationGuide}>
                 <Text style={styles.registrationGuideTitle}>공간분석 세트 등록 번호</Text>
                 <Text style={styles.registrationGuideBody}>키트 하단 라벨에 표시된 숫자 여섯 자리를 입력하면 이 공간과 측정 데이터가 연결됩니다.</Text>
-                <Text style={styles.registrationTestCode}>개발 테스트 코드: 123456</Text>
               </View>
               <Pressable
                 accessibilityLabel="6자리 기기 코드 입력"
@@ -514,7 +532,7 @@ export function SetupFlow({
                 <View style={[styles.connectionDot, connected && styles.connectionDotReady]} />
                 <View>
                   <Text style={styles.connectionTitle}>{connected ? '기기 연결 완료' : '기기 신호를 기다리는 중'}</Text>
-                  <Text style={styles.connectionDescription}>{connected ? '첫 번째 환경 데이터를 받았습니다.' : '연결에는 잠시 시간이 걸릴 수 있습니다.'}</Text>
+                  <Text style={styles.connectionDescription}>{connected ? '기기가 서버에 연결되었습니다.' : '기기 전원을 켜면 이 화면이 자동으로 바뀝니다.'}</Text>
                 </View>
               </View>
               <ActionButton label="공간 진단 시작하기" onPress={onNext} />
@@ -568,7 +586,6 @@ const styles = StyleSheet.create(scaleTypography({
   registrationGuide: { backgroundColor: palette.greenSoft, borderRadius: 9, gap: 7, padding: 18 },
   registrationGuideTitle: { ...typeScale.cardTitle, color: palette.greenDark, fontFamily: font },
   registrationGuideBody: { ...typeScale.body, color: palette.secondary, fontFamily: font },
-  registrationTestCode: { ...typeScale.label, color: palette.greenDark, fontFamily: font, marginTop: 4 },
   codeInputRow: { flexDirection: 'row', gap: 8, justifyContent: 'center' },
   codeInputContainer: { position: 'relative' },
   hiddenCodeInput: { height: 1, opacity: 0, position: 'absolute', width: 1 },
