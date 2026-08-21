@@ -20,6 +20,14 @@ const meta = {
   args: {
     compact: false,
     onNavigate: fn(),
+    pot: {
+      id: 1,
+      deviceId: 1,
+      label: '화분 1',
+      cropCode: 'cherry_tomato',
+      cropSelectedAt: '2026-07-14T02:00:00Z',
+      status: 'ONLINE',
+    },
   },
   render: (args) => (
     <DeviceEnvironmentProvider

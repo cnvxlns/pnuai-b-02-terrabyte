@@ -21,6 +21,7 @@ export type PotResponse = {
   nodeId?: string;
   label: string;
   cropCode?: string;
+  cropSelectedAt?: string;
   status: 'ONLINE' | 'OFFLINE';
   lastSeenAt?: string;
 };

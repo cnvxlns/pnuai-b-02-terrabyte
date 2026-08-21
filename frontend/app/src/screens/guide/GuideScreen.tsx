@@ -8,14 +8,47 @@ import { typeScale } from '../../appTheme/typography';
 import { ActionButton } from '../../components/ActionButton';
 import { SectionHeader } from '../../components/SectionHeader';
 import { Surface } from '../../components/Surface';
-import { cultivationCriteria, managementTasks, shopProducts, type ShopProduct } from '../../data';
+import { managementTasks, shopProducts, type ShopProduct } from '../../data';
+import type { PotResponse } from '../../device/deviceApi';
 import type { Page } from '../../navigation/types';
 import { useDeviceEnvironment } from '../../shared/device-environment/DeviceEnvironmentProvider';
-import { getRecommendedProductIds } from '../../shared/factorPresentation';
+import { getFactorRecommendation, getRecommendedProductIds } from '../../shared/factorPresentation';
 
-export function GuideScreen({ compact, onNavigate }: { compact: boolean; onNavigate: (page: Page) => void }) {
+function formatCultivationDay(cropSelectedAt: string | undefined): string | null {
+  if (!cropSelectedAt) return null;
+  const selected = new Date(cropSelectedAt);
+  if (Number.isNaN(selected.getTime())) return null;
+  // 시각이 아니라 날짜 단위로 센다 — 선택 당일이 1일차다.
+  const startOfDay = (date: Date) => Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+  const elapsedDays = Math.floor((startOfDay(new Date()) - startOfDay(selected)) / 86_400_000);
+  return `재배 ${Math.max(elapsedDays, 0) + 1}일차`;
+}
+
+export function GuideScreen({ compact, onNavigate, pot }: {
+  compact: boolean;
+  onNavigate: (page: Page) => void;
+  pot?: PotResponse;
+}) {
   const [completedTaskIds, setCompletedTaskIds] = useState<Record<string, boolean>>({});
   const { score, soilRecommendation } = useDeviceEnvironment();
+  // 예전에는 "유묘기 · 4주차 / 다음 점검 3일 후"가 그대로 박혀 있었다. 생육 단계를 판정할
+  // 데이터가 저장소에 없으므로 단계 이름을 지어내지 않고, 실제로 아는 값만 보여준다 —
+  // 작물 선택일로 센 경과일과, 적합도 점수가 쓰는 작물별 권장 범위다.
+  const cultivationDayLabel = formatCultivationDay(pot?.cropSelectedAt);
+  const cultivationCriteria = [
+    ...(cultivationDayLabel
+      ? [{
+          label: '재배 경과',
+          title: cultivationDayLabel,
+          body: `${new Date(pot!.cropSelectedAt!).toLocaleDateString('ko-KR')}에 ${score?.cropName ?? '작물'}을(를) 선택했습니다.`,
+        }]
+      : []),
+    ...(score?.factors ?? []).map((factor) => ({
+      label: factor.label,
+      title: `${factor.optimalMin}~${factor.optimalMax}${factor.unit}`,
+      body: `현재 ${factor.current}${factor.unit} · ${getFactorRecommendation(factor.key)}`,
+    })),
+  ];
   const environmentProducts = getRecommendedProductIds(score?.factors ?? [])
     .map((id) => shopProducts.find((product) => product.id === id))
     .filter((product): product is ShopProduct => Boolean(product));
@@ -63,8 +96,11 @@ export function GuideScreen({ compact, onNavigate }: { compact: boolean; onNavig
       </Surface>
 
       <Surface flat style={styles.guidePanel}>
-        <SectionHeader title="재배 단계별 기준" description="현재는 정식 후 활착 단계로, 급격한 환경 변화를 피해야 합니다." />
+        <SectionHeader title="재배 기준" description="작물 선택일부터의 경과일과, 적합도 점수가 사용하는 작물별 권장 범위입니다." />
         <View style={styles.guideTaskList}>
+          {cultivationCriteria.length ? null : (
+            <Text style={styles.guideTaskBody}>작물을 선택하고 측정값이 도착하면 재배 기준이 표시됩니다.</Text>
+          )}
           {cultivationCriteria.map((item, index) => (
             <View key={item.label} style={[styles.guideTaskRow, compact && styles.guideTaskRowCompact]}>
               <View style={styles.guideTaskNumber}><Text style={styles.guideTaskNumberText}>{String(index + 1).padStart(2, '0')}</Text></View>

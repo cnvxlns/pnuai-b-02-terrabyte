@@ -87,6 +87,7 @@ export function AppTabNavigator({ compact, cropName, device, onCreatePot, onLogo
   const navigationRef = useNavigationContainerRef<AppTabParamList>();
   const [page, setPage] = useState<Page>('dashboard');
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const selectedPot = pots.find((pot) => pot.id === selectedPotId);
 
   const syncActivePage = () => {
     const routeName = navigationRef.current?.getCurrentRoute()?.name as keyof AppTabParamList | undefined;
@@ -146,7 +147,7 @@ export function AppTabNavigator({ compact, cropName, device, onCreatePot, onLogo
             <Tab.Screen name="Guide">
               {() => (
                 <ScreenLayout compact={compact} onCreatePot={onCreatePot} onSelectPot={onSelectPot} onUpdatePot={onUpdatePot} page="guide" pots={pots} selectedPotId={selectedPotId}>
-                  <GuideScreen compact={compact} onNavigate={goToPage} />
+                  <GuideScreen compact={compact} onNavigate={goToPage} pot={selectedPot} />
                 </ScreenLayout>
               )}
             </Tab.Screen>

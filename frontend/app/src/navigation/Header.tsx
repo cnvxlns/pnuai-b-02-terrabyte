@@ -7,36 +7,10 @@ import { scaleTypography } from '../appTheme/scaleTypography';
 import { typeScale } from '../appTheme/typography';
 import { Surface } from '../components/Surface';
 import type { PotResponse } from '../device/deviceApi';
+import { useDeviceEnvironment } from '../shared/device-environment/DeviceEnvironmentProvider';
+import { deriveEnvironmentAlerts } from '../shared/factorPresentation';
 import { PotMenu } from './PotMenu';
 import type { Page } from './types';
-
-type EnvironmentAlert = {
-  body: string;
-  id: string;
-  read: boolean;
-  severity: string;
-  time: string;
-  title: string;
-};
-
-const initialAlerts: EnvironmentAlert[] = [
-  {
-    body: '현재 8,000lux로 권장 하한 15,000lux보다 낮습니다. 생장등 상태와 설치 거리를 확인하세요.',
-    id: 'light-low',
-    read: false,
-    severity: '주의',
-    time: '10분 전',
-    title: '조도가 권장 범위보다 낮습니다',
-  },
-  {
-    body: '현재 습도는 45%이며 최근 30분 동안 5% 감소했습니다. 관수 후 환기 시간을 조정하세요.',
-    id: 'humidity-drop',
-    read: false,
-    severity: '확인 필요',
-    time: '24분 전',
-    title: '습도 하락이 지속되고 있습니다',
-  },
-];
 
 const pageCopy: Record<Page, { title: string; description: string }> = {
   dashboard: { title: '공간 개요', description: '스마트팜 전환 적합도와 운영 중인 재배 환경을 확인하세요.' },
@@ -60,12 +34,24 @@ type HeaderProps = {
 export function Header({ compact, onCreatePot, onSelectPot, onUpdatePot, page, pots, selectedPotId }: HeaderProps) {
   const copy = pageCopy[page];
   const [alertsOpen, setAlertsOpen] = useState(false);
-  const [alerts, setAlerts] = useState<EnvironmentAlert[]>(initialAlerts);
-  const unreadAlertCount = alerts.filter((alert) => !alert.read).length;
+  const { score } = useDeviceEnvironment();
+  const alerts = deriveEnvironmentAlerts(score?.factors ?? []);
+  // 읽음 표시는 알림 id로만 기억한다. 알림 자체는 3초마다 점수에서 다시 파생되므로
+  // 읽음 상태를 알림 객체에 얹으면 매번 지워진다. 지표가 정상으로 돌아왔다가 다시
+  // 이탈하면 새로운 알림으로 보아야 하므로, 사라진 id의 읽음 표시는 정리한다.
+  const [readAlertIds, setReadAlertIds] = useState<string[]>([]);
+  const activeReadAlertIds = readAlertIds.filter((id) => alerts.some((alert) => alert.id === id));
+  const unreadAlertCount = alerts.filter((alert) => !activeReadAlertIds.includes(alert.id)).length;
 
   const markAllAlertsRead = () => {
-    setAlerts((current) => current.map((alert) => ({ ...alert, read: true })));
+    setReadAlertIds(alerts.map((alert) => alert.id));
   };
+
+  // "10분 전" 같은 상대 시각 대신 측정 시각을 그대로 보여준다. 알림이 만들어진 시점이
+  // 따로 있는 게 아니라 이 측정값이 근거 전부이기 때문이다.
+  const measuredAtLabel = score
+    ? `${new Date(score.measuredAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })} 기준`
+    : '';
 
   return (
     <>
@@ -117,17 +103,17 @@ export function Header({ compact, onCreatePot, onSelectPot, onUpdatePot, page, p
             </View>
             <View style={styles.alertList}>
               {alerts.length ? alerts.map((alert, index) => (
-                <View key={alert.id} style={[styles.alertItem, index < alerts.length - 1 && styles.alertItemDivider, alert.read && styles.alertItemRead]}>
+                <View key={alert.id} style={[styles.alertItem, index < alerts.length - 1 && styles.alertItemDivider, activeReadAlertIds.includes(alert.id) && styles.alertItemRead]}>
                   <View style={styles.alertItemHeader}>
                     <Text style={[styles.alertSeverity, alert.severity === '주의' ? styles.alertSeverityWarning : styles.alertSeverityCheck]}>{alert.severity}</Text>
-                    <Text style={styles.alertTime}>{alert.time}</Text>
+                    {measuredAtLabel ? <Text style={styles.alertTime}>{measuredAtLabel}</Text> : null}
                   </View>
                   <Text style={styles.alertTitle}>{alert.title}</Text>
                   <Text style={styles.alertBody}>{alert.body}</Text>
                 </View>
               )) : <Text style={styles.emptyAlerts}>새 알림이 없습니다.</Text>}
             </View>
-            {alerts.length ? <Text style={styles.alertPolicy}>알림 기준: 권장 범위 이탈이 10분 이상 지속되면 사용자에게 안내합니다.</Text> : null}
+            {alerts.length ? <Text style={styles.alertPolicy}>알림 기준: 최신 측정값이 작물별 권장 범위를 벗어나면 안내합니다.</Text> : null}
             <View style={styles.modalFooter}>
               <Pressable disabled={!unreadAlertCount} onPress={markAllAlertsRead} style={[styles.modalAction, !unreadAlertCount && styles.modalActionDisabled]}>
                 <Text style={styles.modalActionText}>모두 읽음</Text>

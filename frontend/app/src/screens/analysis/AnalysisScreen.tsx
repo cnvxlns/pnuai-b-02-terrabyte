@@ -9,12 +9,26 @@ import { SectionHeader } from '../../components/SectionHeader';
 import { SuitabilityFormulaModal } from '../../components/SuitabilityFormulaModal';
 import { Surface } from '../../components/Surface';
 import { crops } from '../../data';
-import { getCropRecommendations, type CropRecommendation } from '../../analysis/analysisApi';
+import {
+  getCropRecommendations,
+  getScorePotential,
+  type CropRecommendation,
+  type EnvironmentScorePotential,
+} from '../../analysis/analysisApi';
 import type { DeviceResponse } from '../../device/deviceApi';
 import type { Page } from '../../navigation/types';
 import { useDeviceEnvironment } from '../../shared/device-environment/DeviceEnvironmentProvider';
 import { getFactorRecommendation, getGradeLabel, getIssueFactors } from '../../shared/factorPresentation';
 import { useDisclosure } from '../../shared/hooks/useDisclosure';
+
+function formatScore(value: number | undefined): string {
+  return value === undefined ? '--' : `${value}점`;
+}
+
+function formatDelta(value: number | undefined): string {
+  if (value === undefined) return '--';
+  return `${value > 0 ? '+' : ''}${value}점`;
+}
 
 export function AnalysisScreen({ compact, device, onNavigate, onSelectCrop, selectedCrop }: {
   compact: boolean;
@@ -30,6 +44,24 @@ export function AnalysisScreen({ compact, device, onNavigate, onSelectCrop, sele
   const [selectingCropCode, setSelectingCropCode] = useState<string | null>(null);
   const [cropReports, setCropReports] = useState<CropRecommendation[]>([]);
   const [cropRecommendationError, setCropRecommendationError] = useState<string | null>(null);
+  const [scorePotential, setScorePotential] = useState<EnvironmentScorePotential | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    if (!potId) {
+      setScorePotential(null);
+      return () => { active = false; };
+    }
+    void getScorePotential(potId)
+      .then((potential) => {
+        if (active) setScorePotential(potential);
+      })
+      .catch(() => {
+        // 예상 점수는 보고서의 부가 정보라, 실패하면 해당 카드만 대기 상태로 둔다.
+        if (active) setScorePotential(null);
+      });
+    return () => { active = false; };
+  }, [potId, selectedCrop, analysisScore?.measuredAt]);
 
   useEffect(() => {
     let active = true;
@@ -64,6 +96,14 @@ export function AnalysisScreen({ compact, device, onNavigate, onSelectCrop, sele
       setSelectingCropCode(null);
     }
   };
+
+  // 온도는 실내에서 사용자가 즉시 바꾸기 어려워 백엔드가 조치 대상에서 제외한다.
+  // 그래서 예상 점수는 습도·광량만 적정 범위로 되돌린 값이며, 여기서도 그 전제를 그대로 밝힌다.
+  const potentialSummary = !scorePotential
+    ? '예상 점수를 계산할 측정 데이터를 기다리는 중입니다.'
+    : scorePotential.improvedFactors.length
+      ? `${scorePotential.improvedFactors.map((factor) => factor.label).join('·')}을(를) 적정 범위로 되돌렸을 때의 값입니다. 온도는 조절이 어려워 측정값을 그대로 두었습니다.`
+      : '습도와 광량이 이미 적정 범위에 있어 추가로 끌어올릴 여지가 없습니다.';
 
   const factorReports = analysisScore?.factors.map((factor) => {
     const contributesToOverallScore = ['temperature', 'humidity', 'plantLight'].includes(factor.key);
@@ -291,12 +331,12 @@ export function AnalysisScreen({ compact, device, onNavigate, onSelectCrop, sele
       <Surface flat style={[styles.reportOutcome, compact && styles.stack]}>
         <View style={styles.reportOutcomeCopy}>
           <Text style={styles.reportOutcomeTitle}>권장 조치 적용 시 예상 변화</Text>
-          <Text style={styles.reportOutcomeBody}>생장등과 습도 관리안을 함께 적용한 뒤 7일간 현재 관수 기준을 유지하는 조건입니다.</Text>
+          <Text style={styles.reportOutcomeBody}>{potentialSummary}</Text>
         </View>
         <View style={[styles.reportOutcomeNumbers, compact && styles.stack]}>
-          <View style={styles.reportOutcomeNumber}><Text style={styles.reportOutcomeLabel}>현재 환경점수</Text><Text style={styles.reportOutcomeValue}>68점</Text></View>
-          <View style={styles.reportOutcomeNumber}><Text style={styles.reportOutcomeLabel}>7일 후 예상</Text><Text style={styles.reportOutcomeValueStrong}>83점</Text></View>
-          <View style={styles.reportOutcomeNumber}><Text style={styles.reportOutcomeLabel}>개선 폭</Text><Text style={styles.reportOutcomeValueStrong}>+15점</Text></View>
+          <View style={styles.reportOutcomeNumber}><Text style={styles.reportOutcomeLabel}>현재 환경점수</Text><Text style={styles.reportOutcomeValue}>{formatScore(scorePotential?.current)}</Text></View>
+          <View style={styles.reportOutcomeNumber}><Text style={styles.reportOutcomeLabel}>조치 후 예상</Text><Text style={styles.reportOutcomeValueStrong}>{formatScore(scorePotential?.potential)}</Text></View>
+          <View style={styles.reportOutcomeNumber}><Text style={styles.reportOutcomeLabel}>개선 폭</Text><Text style={styles.reportOutcomeValueStrong}>{formatDelta(scorePotential?.delta)}</Text></View>
         </View>
       </Surface>
     </View>

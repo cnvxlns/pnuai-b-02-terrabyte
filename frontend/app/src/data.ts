@@ -106,24 +106,6 @@ export const managementTasks = [
   },
 ] as const;
 
-export const cultivationCriteria = [
-  {
-    label: '현재 단계',
-    title: '유묘기 · 4주차',
-    body: '뿌리가 새 배지에 자리 잡는 기간입니다. 과습과 강한 빛 변화를 피해야 해요.',
-  },
-  {
-    label: '권장 환경',
-    title: '20~26℃ · 55~70%',
-    body: '보조 조명 4시간을 기준으로 관리합니다.',
-  },
-  {
-    label: '다음 점검',
-    title: '3일 후',
-    body: '잎끝, 흙 마름, 줄기 상태를 확인하고 환경을 다시 분석합니다.',
-  },
-] as const;
-
 export const sidebarDeviceInfo = {
   connectionStatus: '정상 연결',
   title: '내 스마트팜',
