@@ -353,6 +353,62 @@ INSERT INTO crop_score_profile VALUES
    'FAO 절대 4-32°C·최적 15-25°C와 표준 고수 약 26°C 생체중 최적; 200 PPFD·16h 직접 권고; RH는 CEA 일반범위',
    '2.0.0','2026-07-25T00:00:00Z');
 
+-- PPFD 0점 하한의 미입력 자리표시자 0을 광보상점 근사값으로 교체한 프로필 v3.
+-- 작물별 실측값이 아니라 기존 PPFD 최적 하한의 10%를 정수로 반올림하는 단일 규칙을
+-- 적용했다. 산출값은 해당 내음성 등급에 공개된 광보상점 범위 안에 있다
+-- (그늘 전문 작물 약 5-10, 엽채류 15-25, 과채류 30-40 µmol/m²/s).
+-- 특정 논문의 작물별 측정값을 인용한 것이 아니며 직접 측정 전까지 사용하는 근사값이다.
+INSERT INTO crop_score_profile
+  (profile_id,crop_code,crop_name_ko,profile_group,growth_stage,
+   temperature_zero_low_c,temperature_optimal_low_c,
+   temperature_optimal_high_c,temperature_zero_high_c,
+   humidity_zero_low_pct,humidity_optimal_low_pct,
+   humidity_optimal_high_pct,humidity_zero_high_pct,
+   ppfd_zero_low_umol_m2_s,ppfd_optimal_low_umol_m2_s,
+   ppfd_optimal_high_umol_m2_s,ppfd_zero_high_umol_m2_s,
+   reference_photoperiod_h,temperature_weight,humidity_weight,
+   plant_light_weight,temperature_evidence_grade,humidity_evidence_grade,
+   plant_light_evidence_grade,profile_kind,source_summary,profile_version,
+   created_at_utc)
+SELECT replace(profile_id, '-general-v2', '-general-v3'),
+       crop_code,crop_name_ko,profile_group,growth_stage,
+       temperature_zero_low_c,temperature_optimal_low_c,
+       temperature_optimal_high_c,temperature_zero_high_c,
+       humidity_zero_low_pct,humidity_optimal_low_pct,
+       humidity_optimal_high_pct,humidity_zero_high_pct,
+       CASE crop_code
+         WHEN 'basil' THEN 26
+         WHEN 'peppermint' THEN 15
+         WHEN 'cherry_tomato' THEN 30
+         WHEN 'welsh_onion' THEN 21
+         WHEN 'arugula' THEN 20
+         WHEN 'wasabi' THEN 9
+         WHEN 'lettuce' THEN 20
+         WHEN 'coriander' THEN 20
+       END,
+       ppfd_optimal_low_umol_m2_s,ppfd_optimal_high_umol_m2_s,
+       ppfd_zero_high_umol_m2_s,reference_photoperiod_h,
+       temperature_weight,humidity_weight,plant_light_weight,
+       temperature_evidence_grade,humidity_evidence_grade,
+       plant_light_evidence_grade,profile_kind,
+       source_summary || '; 광보상점 ' || CASE crop_code
+         WHEN 'basil' THEN '26은'
+         WHEN 'peppermint' THEN '15는'
+         WHEN 'cherry_tomato' THEN '30은'
+         WHEN 'welsh_onion' THEN '21은'
+         WHEN 'arugula' THEN '20은'
+         WHEN 'wasabi' THEN '9는'
+         WHEN 'lettuce' THEN '20은'
+         WHEN 'coriander' THEN '20은'
+       END || ' 작물별 실측이 아니라 기존 PPFD 최적 하한의 10%를 정수 반올림한 단일 규칙값이며, 내음성 등급별 공개 범위(그늘 전문 5-10, 엽채 15-25, 과채 30-40) 안의 직접 측정 전 근사값',
+       '3.0.0','2026-08-24T00:00:00Z'
+FROM crop_score_profile
+WHERE profile_version = '2.0.0'
+  AND crop_code IN (
+    'basil','peppermint','cherry_tomato','welsh_onion',
+    'arugula','wasabi','lettuce','coriander'
+  );
+
 -- 신규 재배 컨텍스트가 사용할 기본 버전. 기존 컨텍스트는 profile_id를 직접
 -- 참조하므로 활성 버전이 바뀌어도 과거 점수가 재해석되지 않는다.
 CREATE TABLE crop_score_profile_activation (
@@ -364,14 +420,14 @@ CREATE TABLE crop_score_profile_activation (
 ) STRICT, WITHOUT ROWID;
 
 INSERT INTO crop_score_profile_activation VALUES
-  ('basil','basil-general-v2','2026-07-25T00:00:00Z'),
-  ('peppermint','peppermint-general-v2','2026-07-25T00:00:00Z'),
-  ('cherry_tomato','cherry-tomato-general-v2','2026-07-25T00:00:00Z'),
-  ('welsh_onion','welsh-onion-general-v2','2026-07-25T00:00:00Z'),
-  ('arugula','arugula-general-v2','2026-07-25T00:00:00Z'),
-  ('wasabi','wasabi-general-v2','2026-07-25T00:00:00Z'),
-  ('lettuce','lettuce-general-v2','2026-07-25T00:00:00Z'),
-  ('coriander','coriander-general-v2','2026-07-25T00:00:00Z');
+  ('basil','basil-general-v3','2026-08-24T00:00:00Z'),
+  ('peppermint','peppermint-general-v3','2026-08-24T00:00:00Z'),
+  ('cherry_tomato','cherry-tomato-general-v3','2026-08-24T00:00:00Z'),
+  ('welsh_onion','welsh-onion-general-v3','2026-08-24T00:00:00Z'),
+  ('arugula','arugula-general-v3','2026-08-24T00:00:00Z'),
+  ('wasabi','wasabi-general-v3','2026-08-24T00:00:00Z'),
+  ('lettuce','lettuce-general-v3','2026-08-24T00:00:00Z'),
+  ('coriander','coriander-general-v3','2026-08-24T00:00:00Z');
 
 -- 종합점수 모델은 경계 프로필 버전에 1:1로 결합한다. 현재 활성 계약은
 -- equal_geometric_v1 + 1/1/1이며, 정규화된 실제 지수는 각각 1/3이다.
@@ -421,8 +477,14 @@ INSERT INTO crop_score_model_config
 SELECT profile_id || '-score-v1', profile_id, crop_code, 'score-v1',
        'equal_geometric_v1', 1.0, 1.0, 1.0, 'trapezoid_v1', 'validated',
        'aggregation-baseline-2026-07-25',
-       '기존 1/3·1/3·1/3 기하평균과 사다리꼴 축 점수를 변경 없이 명시',
-       '2026-07-25T00:00:00Z'
+       CASE WHEN profile_version = '3.0.0'
+         THEN 'PPFD 0점 하한을 최적 하한의 10%로 반올림한 광보상점 근사값으로 교체'
+         ELSE '기존 1/3·1/3·1/3 기하평균과 사다리꼴 축 점수를 변경 없이 명시'
+       END,
+       CASE WHEN profile_version = '3.0.0'
+         THEN '2026-08-24T00:00:00Z'
+         ELSE '2026-07-25T00:00:00Z'
+       END
 FROM crop_score_profile;
 
 -- ============================================================================
