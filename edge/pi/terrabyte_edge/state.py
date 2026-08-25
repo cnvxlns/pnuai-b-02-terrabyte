@@ -172,6 +172,8 @@ class GatewayState:
         self._lock = Lock()
         self._clock = clock
         self._gateway_id = gateway_id
+        # 기기 등록용 6자리 코드. 미프로비저닝 게이트웨이는 빈 값이고,
+        # 그때는 화면이 render.py 의 자리표시자를 대신 보여준다.
         self._claim_code = claim_code
         self._transport = transport
         self._started_at = clock()

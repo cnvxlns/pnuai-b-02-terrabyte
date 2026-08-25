@@ -5,7 +5,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from threading import Thread
+from unittest.mock import MagicMock
 
+from terrabyte_edge.ui.dashboard import Dashboard
 from terrabyte_edge.ui.render import build_view
 from terrabyte_edge.ui.text import render
 from terrabyte_edge.ui.web import build_server, render_html
@@ -39,6 +41,8 @@ HEALTHY = {
     "events": [{"at_epoch": NOW - 30, "text": "브릿지 시작"}],
 }
 
+CLAIMABLE = {**HEALTHY, "claim_code": "483920"}
+
 BROKEN = {
     **HEALTHY,
     # A past delivery is what distinguishes "끊김" from "연결 시도 중": a gateway
@@ -60,6 +64,15 @@ class TextRendererTests(unittest.TestCase):
         self.assertIn("terrabyte-node-001", out)
         self.assertIn("25.3℃", out)
         self.assertIn("36%", out)
+
+    def test_shows_the_grouped_claim_code_and_instruction(self) -> None:
+        out = render(view(CLAIMABLE))
+        self.assertIn("기기 등록 코드", out)
+        self.assertIn("483 920", out)
+        self.assertIn("앱에서 이 코드를 입력", out)
+
+    def test_missing_claim_code_shows_a_grouped_placeholder(self) -> None:
+        self.assertIn("——— ———", render(view(HEALTHY)))
 
     def test_columns_line_up_across_rows(self) -> None:
         """Korean is double-width in a terminal. Counting characters instead of
@@ -91,6 +104,15 @@ class HtmlRendererTests(unittest.TestCase):
         self.assertIn("25.3℃", page)
         self.assertIn("http-equiv=\"refresh\"", page)
 
+    def test_shows_the_grouped_claim_code_and_instruction(self) -> None:
+        page = render_html(view(CLAIMABLE))
+        self.assertIn("기기 등록 코드", page)
+        self.assertIn("483 920", page)
+        self.assertIn("앱에서 이 코드를 입력", page)
+
+    def test_missing_claim_code_shows_a_grouped_placeholder(self) -> None:
+        self.assertIn("——— ———", render_html(view(HEALTHY)))
+
     def test_is_utf8_declared_and_mobile_sized(self) -> None:
         page = render_html(view(HEALTHY))
         self.assertIn("charset=\"utf-8\"", page)
@@ -108,6 +130,30 @@ class HtmlRendererTests(unittest.TestCase):
     def test_link_level_reaches_the_markup(self) -> None:
         self.assertIn("class=\"ok\"", render_html(view(HEALTHY)))
         self.assertIn("class=\"error\"", render_html(view(BROKEN)))
+
+
+class TkRendererTests(unittest.TestCase):
+    def make_dashboard(self) -> Dashboard:
+        dashboard = Dashboard.__new__(Dashboard)
+        dashboard.banner = MagicMock()
+        dashboard.gateway = MagicMock()
+        dashboard.status = MagicMock()
+        dashboard.claim_code = MagicMock()
+        dashboard.rows = []
+        dashboard.footer = MagicMock()
+        return dashboard
+
+    def test_apply_emits_the_grouped_claim_code_without_opening_a_window(self) -> None:
+        dashboard = self.make_dashboard()
+        dashboard.apply(view(CLAIMABLE))
+
+        dashboard.claim_code.configure.assert_called_once_with(text="483 920")
+
+    def test_apply_emits_a_grouped_placeholder_without_opening_a_window(self) -> None:
+        dashboard = self.make_dashboard()
+        dashboard.apply(view(HEALTHY))
+
+        dashboard.claim_code.configure.assert_called_once_with(text="——— ———")
 
 
 class ServerTests(unittest.TestCase):

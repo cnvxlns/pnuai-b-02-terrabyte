@@ -68,6 +68,21 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "TB_EXPECTED_NODE_ID"):
             Settings.from_env(dict(BASE_ENV, TB_EXPECTED_NODE_ID="node with space"))
 
+    def test_claim_code_accepts_exactly_six_digits(self) -> None:
+        settings = Settings.from_env(dict(BASE_ENV, TB_CLAIM_CODE=" 483920 "))
+        self.assertEqual(settings.claim_code, "483920")
+
+    def test_claim_code_is_optional(self) -> None:
+        self.assertEqual(Settings.from_env(BASE_ENV).claim_code, "")
+
+    def test_malformed_claim_code_is_rejected(self) -> None:
+        for value in ("48392", "4839201", "483 920", "48392a", "４８３９２０"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ConfigError, "TB_CLAIM_CODE must be exactly six digits"
+                ):
+                    Settings.from_env(dict(BASE_ENV, TB_CLAIM_CODE=value))
+
     # --- MQTT transport ---
 
     def test_mqtt_is_the_default_transport(self) -> None:

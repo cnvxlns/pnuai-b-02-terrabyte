@@ -12,6 +12,8 @@ import time
 STALE_AFTER_SECONDS = 8.0
 QUEUE_WARN, QUEUE_ERROR = 50, 500
 Level = Literal["ok", "warn", "error", "idle"]
+CLAIM_CODE_LABEL = "기기 등록 코드"
+CLAIM_CODE_HELP = "앱에서 이 코드를 입력해 기기를 등록하세요"
 METRIC_LABELS = (
     ("air_temperature_c", "기온", "{:.1f}℃"),
     ("air_humidity_pct", "습도", "{:.0f}%"),
@@ -70,6 +72,15 @@ def format_uptime(seconds: float) -> str:
     hours = int(seconds // 3600)
     if hours < 24: return f"{hours}시간 {int(seconds % 3600 // 60)}분"
     return f"{hours // 24}일 {hours % 24}시간"
+
+
+def format_claim_code(claim_code: str) -> str:
+    """Group a code for display without changing the value held by the view."""
+
+    # The placeholder is also six characters, so it gets the same visual break
+    # instead of becoming one long rule that could be mistaken for an empty box.
+    shown = claim_code or "——————"
+    return f"{shown[:3]} {shown[3:]}" if len(shown) == 6 else shown
 
 
 def _empty_row(index: int) -> NodeRow:

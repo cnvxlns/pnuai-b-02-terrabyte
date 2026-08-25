@@ -32,7 +32,15 @@ import time
 from typing import Callable
 
 from ..state import read_snapshot
-from .render import METRIC_LABELS, DashboardView, build_view
+from . import theme
+from .render import (
+    CLAIM_CODE_HELP,
+    CLAIM_CODE_LABEL,
+    METRIC_LABELS,
+    DashboardView,
+    build_view,
+    format_claim_code,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -42,16 +50,16 @@ REFRESH_SECONDS = 2
 # The Tk theme's palette, carried over so the board looks the same as it did on
 # the Orange Pi's monitor.
 PALETTE = {
-    "background": "#12161c",
-    "surface": "#1b212b",
-    "surface_alt": "#232b38",
-    "text": "#e8edf4",
-    "muted": "#8b98ab",
-    "accent": "#60a5fa",
-    "ok": "#4ade80",
-    "warn": "#fbbf24",
-    "error": "#f87171",
-    "idle": "#64748b",
+    "background": theme.BACKGROUND,
+    "surface": theme.SURFACE,
+    "surface_alt": theme.SURFACE_ALT,
+    "text": theme.TEXT,
+    "muted": theme.TEXT_MUTED,
+    "accent": theme.ACCENT,
+    "ok": theme.OK,
+    "warn": theme.WARN,
+    "error": theme.ERROR,
+    "idle": theme.IDLE,
 }
 
 _STYLE = """
@@ -63,6 +71,12 @@ body{margin:0;padding:28px;background:%(background)s;color:%(text)s;
 header{display:flex;justify-content:space-between;align-items:baseline;gap:16px;
  background:%(surface)s;padding:14px 20px;border-radius:8px}
 h1{margin:0;font-size:21px;color:%(accent)s}
+.claim{margin-top:14px;padding:14px 20px;text-align:center;
+ background:%(surface_alt)s;border-radius:8px}
+.claim-label{font-size:18px;font-weight:700}
+.claim-code{color:%(accent)s;font-size:clamp(42px,8vw,72px);
+ font-weight:700;line-height:1.15;letter-spacing:.08em}
+.claim-help{color:%(muted)s;font-size:15px}
 table{width:100%%;border-collapse:collapse;margin:18px 0}
 th{text-align:left;color:%(muted)s;font-weight:500;padding:6px 8px;font-size:15px}
 td{padding:12px 8px}
@@ -112,6 +126,15 @@ def render_html(view: DashboardView) -> str:
             server=esc(view.server_text),
             queue=esc(view.queue_text),
             uptime=esc(view.uptime_text),
+        )
+    )
+    parts.append(
+        "<section class=\"claim\"><div class=\"claim-label\">{label}</div>"
+        "<div class=\"claim-code num\">{code}</div>"
+        "<div class=\"claim-help\">{help}</div></section>".format(
+            label=esc(CLAIM_CODE_LABEL),
+            code=esc(format_claim_code(view.claim_code)),
+            help=esc(CLAIM_CODE_HELP),
         )
     )
 

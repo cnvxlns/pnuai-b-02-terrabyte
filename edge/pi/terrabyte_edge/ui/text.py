@@ -13,7 +13,13 @@ is harder to read than no table.
 
 from __future__ import annotations
 
-from .render import METRIC_LABELS, DashboardView
+from .render import (
+    CLAIM_CODE_HELP,
+    CLAIM_CODE_LABEL,
+    METRIC_LABELS,
+    DashboardView,
+    format_claim_code,
+)
 
 
 HEADERS = ("화분", "노드", "링크", *(label for _, label, _ in METRIC_LABELS), "마지막 수신")
@@ -59,6 +65,10 @@ def render(view: DashboardView) -> str:
     lines.append(
         f"서버 {view.server_text}   대기열 {view.queue_text}   가동 {view.uptime_text}"
     )
+    lines.append("")
+    lines.append(CLAIM_CODE_LABEL)
+    lines.append(f"    {format_claim_code(view.claim_code)}")
+    lines.append(CLAIM_CODE_HELP)
     lines.append("")
 
     table = [HEADERS, *((row.label, row.node_id, row.link_text, *row.values, row.last_seen)
