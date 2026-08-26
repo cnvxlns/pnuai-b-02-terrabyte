@@ -149,18 +149,20 @@ export function Sidebar({ compact, cropName, device, onHide, onLogout, onNavigat
               <Text style={styles.modalCloseText}>닫기</Text>
             </Pressable>
           </View>
-          <View style={styles.farmStatusSummary}>
-            <View style={[styles.onlineDot, !online && styles.offlineDot]} />
-            <View style={styles.farmStatusCopy}>
-              <Text style={styles.farmStatusTitle}>{connectionStatus}</Text>
-              <Text style={styles.farmStatusBody}>{device ? '기기와 연결된 화분 정보를 API에서 불러왔습니다.' : '등록된 기기 정보를 불러오지 못했습니다.'}</Text>
+          <ScrollView contentContainerStyle={styles.modalScrollContent} showsVerticalScrollIndicator style={styles.modalScroll}>
+            <View style={styles.farmStatusSummary}>
+              <View style={[styles.onlineDot, !online && styles.offlineDot]} />
+              <View style={styles.farmStatusCopy}>
+                <Text style={styles.farmStatusTitle}>{connectionStatus}</Text>
+                <Text style={styles.farmStatusBody}>{device ? '기기와 연결된 화분 정보를 API에서 불러왔습니다.' : '등록된 기기 정보를 불러오지 못했습니다.'}</Text>
+              </View>
             </View>
-          </View>
-          <View style={styles.productInfoList}>
-            {farmInfoRows.map((row) => (
-              <View key={row.label} style={styles.productInfoRow}><Text style={styles.productInfoLabel}>{row.label}</Text><Text style={styles.productInfoValue}>{row.value}</Text></View>
-            ))}
-          </View>
+            <View style={styles.productInfoList}>
+              {farmInfoRows.map((row) => (
+                <View key={row.label} style={styles.productInfoRow}><Text style={styles.productInfoLabel}>{row.label}</Text><Text style={styles.productInfoValue}>{row.value}</Text></View>
+              ))}
+            </View>
+          </ScrollView>
         </Surface>
       </View>
     </Modal>
@@ -175,9 +177,11 @@ export function Sidebar({ compact, cropName, device, onHide, onLogout, onNavigat
               <Text style={styles.modalCloseText}>닫기</Text>
             </Pressable>
           </View>
-          {sensorsLoading ? <Text style={styles.sensorStatusText}>센서 상태를 불러오는 중입니다.</Text> : null}
-          {!sensorsLoading && sensorsError ? <Text style={styles.sensorStatusText}>{sensorsError}</Text> : null}
-          {!sensorsLoading && !sensorsError ? <SensorSummary sensors={deviceSensors} statusLabel={connectionStatus} /> : null}
+          <ScrollView contentContainerStyle={styles.modalScrollContent} showsVerticalScrollIndicator style={styles.modalScroll}>
+            {sensorsLoading ? <Text style={styles.sensorStatusText}>센서 상태를 불러오는 중입니다.</Text> : null}
+            {!sensorsLoading && sensorsError ? <Text style={styles.sensorStatusText}>{sensorsError}</Text> : null}
+            {!sensorsLoading && !sensorsError ? <SensorSummary sensors={deviceSensors} statusLabel={connectionStatus} /> : null}
+          </ScrollView>
         </Surface>
       </View>
     </Modal>
@@ -218,12 +222,14 @@ const styles = StyleSheet.create(scaleTypography({
   mobileNavText: { ...typeScale.bodyStrong, color: palette.muted, fontFamily: font },
   mobileNavTextActive: { color: palette.greenDark },
   modalBackdrop: { alignItems: 'center', backgroundColor: 'rgba(21, 46, 35, 0.34)', flex: 1, justifyContent: 'center', padding: 22 },
-  infoModal: { gap: 22, maxHeight: '84%', maxWidth: 580, padding: 28, width: '100%' },
+  infoModal: { gap: 0, maxHeight: '84%', maxWidth: 580, padding: 28, width: '100%' },
   modalHeader: { alignItems: 'flex-start', flexDirection: 'row', gap: 18, justifyContent: 'space-between' },
   modalHeaderCopy: { flex: 1, gap: 5 },
   modalTitle: { ...typeScale.dialogTitle, color: palette.text, fontFamily: font },
   modalClose: { alignItems: 'center', borderColor: palette.line, borderRadius: 8, borderWidth: 1, justifyContent: 'center', minHeight: 36, paddingHorizontal: 12 },
   modalCloseText: { ...typeScale.button, color: palette.secondary, fontFamily: font },
+  modalScroll: { flexShrink: 1, marginTop: 22 },
+  modalScrollContent: { gap: 22, paddingBottom: 2 },
   productInfoList: { borderColor: palette.line, borderRadius: 12, borderWidth: 1, overflow: 'hidden' },
   productInfoRow: { alignItems: 'center', borderBottomColor: palette.line, borderBottomWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 50, paddingHorizontal: 16 },
   productInfoLabel: { ...typeScale.label, color: palette.muted, fontFamily: font },
