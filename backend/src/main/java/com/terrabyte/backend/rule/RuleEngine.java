@@ -1,10 +1,14 @@
 package com.terrabyte.backend.rule;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalTime;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
+import com.terrabyte.backend.irrigation.IrrigationOutcome;
 import com.terrabyte.backend.irrigation.IrrigationService;
 import com.terrabyte.backend.irrigation.LightService;
 import com.terrabyte.backend.measurement.MeasurementStore;
@@ -55,6 +59,20 @@ public class RuleEngine {
     private final LightService lightService;
     private final RuleProperties properties;
     private final Clock clock;
+
+    /**
+     * What this engine last told each lamp to do, and when each pot may next be
+     * worth asking about.
+     *
+     * <p>In memory rather than in the database, and that is deliberate rather
+     * than lazy. A restart forgets both, which means the first pass after one
+     * re-asserts the lamp and re-asks the Governor — exactly what you want,
+     * because a gateway may have missed commands while the backend was down. A
+     * persisted copy would suppress that re-assertion and leave a lamp in
+     * whatever state the outage caught it in.
+     */
+    private final Map<Long, Boolean> lastLampState = new ConcurrentHashMap<>();
+    private final Map<Long, Instant> irrigationRetryAt = new ConcurrentHashMap<>();
 
     public RuleEngine(
             PotRepository potRepository,
@@ -131,6 +149,19 @@ public class RuleEngine {
             return;
         }
         if (sample.soilMoisturePct() >= properties.soilDryGatePct()) {
+            // Back above the gate: whatever the Governor last said is moot.
+            irrigationRetryAt.remove(pot.id());
+            return;
+        }
+
+        Instant retryAt = irrigationRetryAt.get(pot.id());
+        if (retryAt != null && clock.instant().isBefore(retryAt)) {
+            // The Governor already answered "not before this time". Asking again
+            // every minute writes an hour of identical COOLDOWN rows that answer
+            // no question the first one did not, and buries the refusals that
+            // actually change in the ones that do not.
+            LOGGER.debug(
+                    "rule: still holding off pot_id={} until {}", pot.id(), retryAt);
             return;
         }
 
@@ -138,7 +169,16 @@ public class RuleEngine {
         LOGGER.info(
                 "rule: soil {}% below {}% pot_id={} correlation_id={}",
                 sample.soilMoisturePct(), properties.soilDryGatePct(), pot.id(), correlationId);
-        irrigationService.requestAutomatic(pot.id(), correlationId);
+        IrrigationOutcome outcome = irrigationService.requestAutomatic(pot.id(), correlationId);
+
+        if (outcome != null && !outcome.granted() && outcome.nextAvailableAt() != null) {
+            irrigationRetryAt.put(pot.id(), outcome.nextAvailableAt());
+        } else {
+            // Granted, or refused for a reason that carries no retry time.
+            // INPUT_STALE and SENSOR_INVALID are the latter: they clear the
+            // moment a good reading lands, which could be the very next pass.
+            irrigationRetryAt.remove(pot.id());
+        }
     }
 
     /**
@@ -183,12 +223,27 @@ public class RuleEngine {
         // Inside the band: nothing to say. The lamp keeps whatever state it has.
     }
 
+    /**
+     * Commands the lamp, but only when this is news.
+     *
+     * <p>The rule reaches a verdict on every pass, and outside the photoperiod
+     * or below the band that verdict does not change for hours. Publishing it
+     * each time fills {@code device_command} with roughly 1,440 rows a day per
+     * pot, makes the edge relay journal every one of them, and buries the
+     * commands a person actually issued in the history screen.
+     */
     private void request(Pot pot, boolean on, String prefix) {
+        if (Boolean.valueOf(on).equals(lastLampState.get(pot.id()))) {
+            return;
+        }
         String correlationId = correlationId(prefix);
         LOGGER.info(
                 "rule: light {} pot_id={} correlation_id={}",
                 on ? "on" : "off", pot.id(), correlationId);
         lightService.requestAutomatic(pot.id(), on, correlationId);
+        // Recorded after the call, so a service that threw is retried next pass
+        // rather than remembered as done.
+        lastLampState.put(pot.id(), on);
     }
 
     /**
