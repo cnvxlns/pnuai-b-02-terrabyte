@@ -154,6 +154,30 @@
 #if TB_SOIL_MOISTURE_DRY_ADC == TB_SOIL_MOISTURE_WET_ADC
 #error "Soil-moisture dry and wet ADC calibration values must differ"
 #endif
+
+// The endpoints must be measurements, not the rails.
+//
+// "Defined and different" is not enough, and 1023/0 is the proof: it satisfies
+// both checks above and is what a board reports before anyone has calibrated
+// it. The percentage that comes out is then a linear stretch of the entire ADC
+// range — plausible-looking, wrong by a wide margin, and completely silent.
+// node-001 shipped that way and reported 53% for soil sitting at 40%, which is
+// the difference between "the rule engine waters this pot" and "it never does".
+//
+// A capacitive probe cannot reach either rail. Dry air lands somewhere around
+// 450-700 and full immersion around 180-350, depending on the supply rail, so
+// the span is a few hundred counts rather than a thousand. The bounds below are
+// deliberately far looser than any real calibration: they are here to catch a
+// placeholder, not to grade a measurement.
+#if TB_SOIL_MOISTURE_DRY_ADC > 950 || TB_SOIL_MOISTURE_WET_ADC > 950
+#error "Soil-moisture calibration looks like an ADC rail (>950), not a measurement. Calibrate the probe in air and in water, or copy the config for this board."
+#endif
+#if TB_SOIL_MOISTURE_DRY_ADC < 60 || TB_SOIL_MOISTURE_WET_ADC < 60
+#error "Soil-moisture calibration looks like an ADC rail (<60), not a measurement. Calibrate the probe in air and in water, or copy the config for this board."
+#endif
+#if (TB_SOIL_MOISTURE_DRY_ADC - TB_SOIL_MOISTURE_WET_ADC > 600) || (TB_SOIL_MOISTURE_WET_ADC - TB_SOIL_MOISTURE_DRY_ADC > 600)
+#error "Soil-moisture calibration spans more than 600 ADC counts. A capacitive probe spans a few hundred; this looks like the full range was used as a placeholder."
+#endif
 #endif
 
 // Validation limits. The temperature limits match the rated DHT22 range.
