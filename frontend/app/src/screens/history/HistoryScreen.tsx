@@ -7,12 +7,18 @@ import { scaleTypography } from '../../appTheme/scaleTypography';
 import { typeScale } from '../../appTheme/typography';
 import { ActionButton } from '../../components/ActionButton';
 import { SectionHeader } from '../../components/SectionHeader';
+import {
+  describeCommandState,
+  getCommandHistory,
+  type CommandHistoryEntry,
+} from '../../irrigation/commandApi';
 import { Surface } from '../../components/Surface';
 import { getDiagnosticHistory, type DiagnosticHistoryRecord } from '../../history/historyApi';
 import type { Page } from '../../navigation/types';
 
 export function HistoryScreen({ compact, onNavigate, potId }: { compact: boolean; onNavigate: (page: Page) => void; potId?: number }) {
   const [records, setRecords] = useState<DiagnosticHistoryRecord[]>([]);
+  const [commands, setCommands] = useState<CommandHistoryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,6 +39,35 @@ export function HistoryScreen({ compact, onNavigate, potId }: { compact: boolean
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [potId]);
+
+  useEffect(() => {
+    if (potId === undefined) {
+      setCommands([]);
+      return undefined;
+    }
+    let active = true;
+    void getCommandHistory(potId, 20)
+      .then((loaded) => { if (active) setCommands(loaded); })
+      // Silent: the diagnostic history above is the reason this screen exists,
+      // and an error banner for the secondary panel would sit on top of it.
+      .catch(() => { if (active) setCommands([]); });
+    return () => { active = false; };
+  }, [potId]);
+
+  const formatCommandTime = (iso: string) =>
+    new Date(iso).toLocaleString('ko-KR', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    });
+
+  const describeCommand = (entry: CommandHistoryEntry) => {
+    if (entry.actuator === 'light') {
+      return entry.action === 'on' ? '조명 켜기' : '조명 끄기';
+    }
+    // What came out, falling back to what was authorised. The two differ
+    // whenever the firmware cut a run short, and the difference is the point.
+    const ml = entry.actualMl ?? entry.grantedMl;
+    return ml === null ? '관수' : `관수 ${ml} mL`;
+  };
 
   const initialScore = records[records.length - 1]?.score ?? 0;
   const currentScore = records[0]?.score ?? 0;
@@ -72,6 +107,33 @@ export function HistoryScreen({ compact, onNavigate, potId }: { compact: boolean
         </View>
       </Surface>
 
+      <Surface flat style={styles.historyPanel}>
+        <SectionHeader
+          title="제어 기록"
+          description="펌프와 조명에 보낸 명령과 그 결과입니다. 거절된 요청도 함께 남습니다."
+        />
+        <View style={styles.historyList}>
+          {commands.map((entry) => (
+            <View key={entry.commandId} style={[styles.commandRow, compact && styles.stack]}>
+              <View style={styles.historyDateBlock}>
+                <Text style={styles.commandTime}>{formatCommandTime(entry.issuedAt)}</Text>
+              </View>
+              <View style={styles.historyCopy}>
+                <Text style={styles.historyTitle}>{describeCommand(entry)}</Text>
+                <Text style={styles.historyIssue}>
+                  {describeCommandState(entry.state)}
+                  {entry.stopCause ? ` · ${entry.stopCause}` : ''}
+                  {entry.origin === 'EDGE_FALLBACK' ? ' · 오프라인 자율 관수' : ''}
+                </Text>
+              </View>
+            </View>
+          ))}
+          {!commands.length ? (
+            <Text style={styles.historyIssue}>표시할 제어 기록이 아직 없습니다.</Text>
+          ) : null}
+        </View>
+      </Surface>
+
       <Surface flat style={styles.historyComparePanel}>
           <View style={styles.historyCompareCopy}><Text style={styles.historyCompareTitle}>최초 측정 이후 환경 적합도 변화를 확인할 수 있습니다.</Text><Text style={styles.historyCompareBody}>저장된 측정 시점의 온도·습도·광량으로 적합도를 다시 계산한 기록입니다.</Text></View>
           <View style={styles.historyCompareValue}><Text style={styles.historyCompareValueLabel}>적합도 변화</Text><Text style={styles.historyCompareValueNumber}><Text style={styles.historyCompareValueBaseline}>{records.length ? Math.round(initialScore) : '--'}</Text><Text style={styles.historyCompareValueArrow}> → </Text><Text style={styles.historyScoreUp}>{records.length ? Math.round(currentScore) : '--'}</Text></Text></View>
@@ -92,6 +154,11 @@ const styles = StyleSheet.create(scaleTypography({
   historyList: { overflow: 'hidden' },
   historyRow: { alignItems: 'center', borderBottomColor: palette.lineStrong, borderBottomWidth: 1, flexDirection: 'row', gap: 22, minHeight: 124, padding: 24 },
   historyDateBlock: { gap: 5, width: 120 },
+  commandRow: {
+    alignItems: 'center', borderBottomColor: palette.lineStrong, borderBottomWidth: 1,
+    flexDirection: 'row', gap: 22, minHeight: 68, paddingHorizontal: 24, paddingVertical: 16,
+  },
+  commandTime: { ...typeScale.caption, color: palette.muted, fontFamily: font },
   historyDate: { ...typeScale.cardTitle, color: palette.text, fontFamily: font, fontSize: 16, fontWeight: '600', lineHeight: 22 },
   historyScoreBlock: { alignItems: 'flex-end', flexDirection: 'row', minWidth: 100 },
   historyScore: { ...typeScale.metric, color: palette.greenDark, fontFamily: font },

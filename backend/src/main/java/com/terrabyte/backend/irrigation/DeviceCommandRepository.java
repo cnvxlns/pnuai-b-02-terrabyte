@@ -1,8 +1,6 @@
 package com.terrabyte.backend.irrigation;
 
 import java.sql.PreparedStatement;
-
-import org.springframework.dao.DuplicateKeyException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -14,6 +12,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -89,6 +88,34 @@ public class DeviceCommandRepository {
             // primary key do the work is portable and needs no dialect branch.
             return false;
         }
+    }
+
+    /**
+     * Recent commands for a pot, newest first, every actuator and every outcome.
+     *
+     * <p>Refusals included. A user who taps the button four times needs to see
+     * four rows, not the one that happened to succeed — the whole point of the
+     * history screen is telling a rejection apart from a silence.
+     */
+    public List<DeviceCommand> findRecentByPot(long potId, int limit) {
+        return jdbcTemplate.query(
+                "SELECT * FROM device_command WHERE pot_id = ?"
+                        + " ORDER BY issued_at DESC, command_id DESC LIMIT ?",
+                this::mapCommand,
+                potId,
+                limit);
+    }
+
+    /** The last command for one actuator, whatever became of it. */
+    public Optional<DeviceCommand> findLatestByActuator(long potId, String actuator) {
+        return jdbcTemplate.query(
+                        "SELECT * FROM device_command WHERE pot_id = ? AND actuator = ?"
+                                + " ORDER BY issued_at DESC, command_id DESC LIMIT 1",
+                        this::mapCommand,
+                        potId,
+                        actuator)
+                .stream()
+                .findFirst();
     }
 
     public Optional<DeviceCommand> findById(String commandId) {

@@ -9,7 +9,7 @@ import { ActionButton } from '../components/ActionButton';
 import { BrandMark } from '../components/BrandMark';
 import { Surface } from '../components/Surface';
 import { getCrops, selectPotCrop, type CropResponse } from '../crop/cropApi';
-import { registerDevice, type DeviceResponse } from '../device/deviceApi';
+import { getDevice, registerDevice, type DeviceResponse } from '../device/deviceApi';
 import type { FlowStage } from '../navigation/types';
 import { createCultivationSpace, getCultivationSpaces, type CultivationSpaceResponse } from '../space/spaceApi';
 
@@ -112,7 +112,8 @@ export function SetupFlow({
 }) {
   const { width } = useWindowDimensions();
   const compact = width < 780;
-  const [connected, setConnected] = useState(false);
+  const [gatewayOnline, setGatewayOnline] = useState(false);
+  const [potOnline, setPotOnline] = useState(false);
   const [serialCode, setSerialCode] = useState('');
   const [spaceName, setSpaceName] = useState('');
   const [spaceType, setSpaceType] = useState<(typeof spaceTypeOptions)[number]['value'] | ''>('');
@@ -249,13 +250,36 @@ export function SetupFlow({
   }, [stage]);
 
   useEffect(() => {
-    if (stage !== 'setup') {
-      setConnected(false);
+    if (stage !== 'setup' || !deviceId) {
+      setGatewayOnline(false);
+      setPotOnline(false);
       return undefined;
     }
-    const timer = setTimeout(() => setConnected(true), 1800);
-    return () => clearTimeout(timer);
-  }, [stage]);
+    let active = true;
+    // Polled from the real device rather than assumed after a delay. The old
+    // timer reported "기기 연결 완료" 1.8 seconds after this screen opened,
+    // whether or not anything had ever been plugged in — which is precisely the
+    // screen where a person is standing at the hardware trying to find out.
+    const poll = () => {
+      void getDevice(deviceId)
+        .then((device) => {
+          if (!active) return;
+          setGatewayOnline(device.status === 'ONLINE');
+          setPotOnline((device.pots ?? []).some((pot) => pot.status === 'ONLINE'));
+        })
+        .catch(() => {
+          if (!active) return;
+          setGatewayOnline(false);
+          setPotOnline(false);
+        });
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [stage, deviceId]);
 
   useEffect(() => {
     if (stage !== 'crop') return undefined;
@@ -509,11 +533,33 @@ export function SetupFlow({
                   </View>
                 ))}
               </View>
-              <View style={[styles.connectionPanel, connected && styles.connectionPanelReady]}>
-                <View style={[styles.connectionDot, connected && styles.connectionDotReady]} />
+              <View style={[styles.connectionPanel, gatewayOnline && styles.connectionPanelReady]}>
+                <View style={[styles.connectionDot, gatewayOnline && styles.connectionDotReady]} />
                 <View>
-                  <Text style={styles.connectionTitle}>{connected ? '기기 연결 완료' : '기기 신호를 기다리는 중'}</Text>
-                  <Text style={styles.connectionDescription}>{connected ? '첫 번째 환경 데이터를 받았습니다.' : '연결에는 잠시 시간이 걸릴 수 있습니다.'}</Text>
+                  <Text style={styles.connectionTitle}>
+                    {gatewayOnline ? '공간분석 세트 연결됨' : '공간분석 세트 신호를 기다리는 중'}
+                  </Text>
+                  <Text style={styles.connectionDescription}>
+                    {gatewayOnline
+                      ? '게이트웨이가 서버에 연결되어 있습니다.'
+                      : '전원과 네트워크를 확인해 주세요. 연결에는 잠시 시간이 걸릴 수 있습니다.'}
+                  </Text>
+                </View>
+              </View>
+              {/* Two panels, because they fail separately: a gateway can be
+                  online while the pot's node says nothing, and that is the case
+                  someone standing at the bed needs to be able to see. */}
+              <View style={[styles.connectionPanel, potOnline && styles.connectionPanelReady]}>
+                <View style={[styles.connectionDot, potOnline && styles.connectionDotReady]} />
+                <View>
+                  <Text style={styles.connectionTitle}>
+                    {potOnline ? '토양분석 세트 연결됨' : '토양분석 세트 신호를 기다리는 중'}
+                  </Text>
+                  <Text style={styles.connectionDescription}>
+                    {potOnline
+                      ? '첫 번째 환경 데이터를 받았습니다.'
+                      : '센서를 흙에 꽂고 전원 표시등을 확인해 주세요.'}
+                  </Text>
                 </View>
               </View>
               <ActionButton label="공간 진단 시작하기" onPress={onNext} />

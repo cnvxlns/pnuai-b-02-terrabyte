@@ -32,6 +32,16 @@ public class PotController {
         return potService.findOne(Long.parseLong(jwt.getSubject()), potId);
     }
 
+    /** Turns the rule engine on or off for this pot. */
+    @PatchMapping("/{potId}/auto-control")
+    public PotResponse setAutoControl(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable long potId,
+            @Valid @RequestBody AutoControlRequest request) {
+        return potService.setAutoControl(
+                Long.parseLong(jwt.getSubject()), potId, request.enabled());
+    }
+
     @PatchMapping("/{potId}")
     public PotResponse update(
             @AuthenticationPrincipal Jwt jwt,

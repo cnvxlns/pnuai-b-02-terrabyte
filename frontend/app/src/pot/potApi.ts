@@ -8,3 +8,11 @@ export function getPots() {
 export function getPot(potId: number) {
   return authenticatedRequest<PotResponse>(`/api/pots/${potId}`);
 }
+
+/** Hands this pot to the rule engine, or takes it back. */
+export function setAutoControl(potId: number, enabled: boolean) {
+  return authenticatedRequest<PotResponse>(`/api/pots/${potId}/auto-control`, {
+    method: 'PATCH',
+    body: JSON.stringify({ enabled }),
+  });
+}

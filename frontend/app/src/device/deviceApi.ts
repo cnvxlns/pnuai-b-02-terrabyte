@@ -23,6 +23,13 @@ export type PotResponse = {
   cropCode?: string;
   status: 'ONLINE' | 'OFFLINE';
   lastSeenAt?: string;
+  /**
+   * Whether the rule engine may act on this pot.
+   *
+   * Off means "I will decide when to water", not "nothing may run": manual
+   * irrigation and light commands ignore it entirely.
+   */
+  autoControlEnabled: boolean;
 };
 
 export type RegisterDeviceInput = {
