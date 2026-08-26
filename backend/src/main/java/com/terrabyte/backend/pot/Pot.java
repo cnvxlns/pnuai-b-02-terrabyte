@@ -16,5 +16,9 @@ public record Pot(
         Instant createdAt,
         // Null means the volume was never recorded, which the irrigation
         // fallback table treats as the smallest pot rather than guessing.
-        Integer substrateVolumeMl) {
+        Integer substrateVolumeMl,
+        // Whether the rule engine may act on this pot. Off means "I will do it
+        // myself", not "nothing may run": manual irrigation and light commands
+        // ignore this entirely.
+        boolean autoControlEnabled) {
 }

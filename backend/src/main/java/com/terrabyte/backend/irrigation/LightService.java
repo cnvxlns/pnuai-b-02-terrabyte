@@ -42,7 +42,22 @@ public class LightService {
 
     public LightOutcome requestManual(long potId, long userId, boolean on) {
         requireOwnedPot(potId, userId);
+        return request(potId, on, "manual-light-" + clock.millis());
+    }
 
+    /**
+     * The rule engine decided the lamp should change state.
+     *
+     * <p>No user id, exactly like {@code IrrigationService#requestAutomatic}:
+     * nobody tapped anything, so there is no ownership to prove. The caller
+     * supplies the correlation id instead, which is what joins this command to
+     * the reading that caused it.
+     */
+    public LightOutcome requestAutomatic(long potId, boolean on, String correlationId) {
+        return request(potId, on, correlationId);
+    }
+
+    private LightOutcome request(long potId, boolean on, String correlationId) {
         Optional<CommandTarget> resolved = targetResolver.resolve(potId);
         if (resolved.isEmpty() || !resolved.get().isAddressable()) {
             // A transport returning false after authorisation means delivery
@@ -69,7 +84,7 @@ public class LightService {
         DeviceCommand command = DeviceCommand.issuedLight(
                 commandIdGenerator.next(now),
                 potId,
-                "manual-light-" + now.toEpochMilli(),
+                correlationId,
                 on,
                 now,
                 now.plus(properties.commandTtl()));

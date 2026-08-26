@@ -199,9 +199,19 @@ public class IrrigationService {
      * repository by the controller, so the ownership check has exactly one home.
      * A watering history says when a plant was dry and when someone was home.
      */
-    public List<IrrigationDecision> timeline(long potId, long userId, int limit) {
+    public List<IrrigationTimelineEntry> timeline(long potId, long userId, int limit) {
         requireOwnedPot(potId, userId);
-        return decisionRepository.findRecentByPotId(potId, Math.clamp(limit, 1, 100));
+        return decisionRepository.findRecentByPotId(potId, Math.clamp(limit, 1, 100)).stream()
+                // Joined per decision rather than in one query, because a
+                // refusal has no command id to join on and the list is capped at
+                // a hundred rows. A join here would trade a readable answer for
+                // a saving nobody can measure.
+                .map(decision -> IrrigationTimelineEntry.of(
+                        decision,
+                        decision.commandId() == null
+                                ? null
+                                : commandRepository.findById(decision.commandId()).orElse(null)))
+                .toList();
     }
 
     /**

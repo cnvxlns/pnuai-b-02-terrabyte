@@ -380,7 +380,7 @@ class VolumeResolverTests {
         return new Pot(
                 POT_ID, 1L, "node-1", "화분 1", cropCode, Instant.parse("2026-08-01T00:00:00Z"),
                 DeviceStatus.ONLINE, Instant.parse("2026-08-17T09:59:00Z"),
-                Instant.parse("2026-07-01T00:00:00Z"), substrateVolumeMl);
+                Instant.parse("2026-07-01T00:00:00Z"), substrateVolumeMl, true);
     }
 
     private static TelemetrySample sampleWith(IrrigationSuggestion suggestion) {

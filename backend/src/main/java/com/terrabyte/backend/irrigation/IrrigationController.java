@@ -70,7 +70,7 @@ public class IrrigationController {
      * unless someone can see the reasons stacking up.
      */
     @GetMapping("/timeline")
-    public List<IrrigationDecision> timeline(
+    public List<IrrigationTimelineEntry> timeline(
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable long potId,
             @RequestParam(defaultValue = "20") int limit) {

@@ -12,11 +12,12 @@ public record PotResponse(
         String label,
         @JsonInclude(JsonInclude.Include.NON_NULL) String cropCode,
         DeviceStatus status,
-        @JsonInclude(JsonInclude.Include.NON_NULL) Instant lastSeenAt) {
+        @JsonInclude(JsonInclude.Include.NON_NULL) Instant lastSeenAt,
+        boolean autoControlEnabled) {
 
     public static PotResponse from(Pot pot) {
         return new PotResponse(
                 pot.id(), pot.deviceId(), pot.nodeId(), pot.label(), pot.cropCode(),
-                pot.status(), pot.lastSeenAt());
+                pot.status(), pot.lastSeenAt(), pot.autoControlEnabled());
     }
 }
