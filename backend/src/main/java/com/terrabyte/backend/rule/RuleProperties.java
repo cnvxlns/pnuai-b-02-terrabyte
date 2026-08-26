@@ -2,6 +2,7 @@ package com.terrabyte.backend.rule;
 
 import java.time.Duration;
 import java.time.LocalTime;
+import java.time.ZoneId;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -43,7 +44,21 @@ public record RuleProperties(
          * hysteresis: a single threshold would toggle the lamp on every pass
          * while a reading hovered on it.
          */
-        Double lightBandMargin) {
+        Double lightBandMargin,
+        /**
+         * The zone the photoperiod window is written in.
+         *
+         * <p>Needed because the shared {@code Clock} bean is
+         * {@code Clock.systemUTC()}, which is right for durations and
+         * timestamps and wrong for a wall-clock window: read in UTC, a
+         * 06:00-22:00 window in Seoul becomes 15:00-07:00 local, so the lamp
+         * runs all night and sits dark all day. A photoperiod is a statement
+         * about where the plant is, not about where the server keeps time.
+         *
+         * <p>Defaults to the JVM zone, which the deployment sets through
+         * {@code TZ} in compose.
+         */
+        ZoneId photoperiodZone) {
 
     public RuleProperties {
         interval = interval == null ? Duration.ofMinutes(1) : interval;
@@ -52,6 +67,7 @@ public record RuleProperties(
         photoperiodStart = photoperiodStart == null ? LocalTime.of(6, 0) : photoperiodStart;
         photoperiodEnd = photoperiodEnd == null ? LocalTime.of(22, 0) : photoperiodEnd;
         lightBandMargin = lightBandMargin == null ? 1.0 : lightBandMargin;
+        photoperiodZone = photoperiodZone == null ? ZoneId.systemDefault() : photoperiodZone;
 
         if (soilDryGatePct <= 0.0 || soilDryGatePct > 100.0) {
             throw new IllegalArgumentException("app.rule.soil-dry-gate-pct must be within (0, 100]");

@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 
@@ -74,7 +75,7 @@ class RuleEngineTests {
     private RuleEngine buildEngine(Instant now) {
         return new RuleEngine(
                 pots, measurements, profiles, irrigation, light,
-                new RuleProperties(null, null, null, null, null, null),
+                new RuleProperties(null, null, null, null, null, null, null),
                 Clock.fixed(now, ZoneId.of("Asia/Seoul")));
     }
 
@@ -184,6 +185,25 @@ class RuleEngineTests {
 
         // Plants need the dark as much as the light. A rule that only chases
         // PPFD would run the lamp all night and stop them flowering.
+        verify(light).requestAutomatic(eqPot(), org.mockito.ArgumentMatchers.eq(false), anyString());
+    }
+
+    @Test
+    void thePhotoperiodIsReadInTheGrowersZoneNotTheClocksZone() {
+        // The shared Clock bean is Clock.systemUTC(), so LocalTime.now(clock)
+        // is UTC no matter where the greenhouse is. Read that way, a 06:00-22:00
+        // window in Seoul becomes 15:00-07:00 local — the lamp runs all night
+        // and sits dark all day, which is precisely backwards.
+        engine = new RuleEngine(
+                pots, measurements, profiles, irrigation, light,
+                new RuleProperties(null, null, null, null, null, null, null),
+                // 04:36 KST, well outside the window. 19:36 UTC, well inside it.
+                Clock.fixed(Instant.parse("2026-08-26T19:36:00Z"), ZoneOffset.UTC));
+        given(pot(CROP, DeviceStatus.ONLINE, true));
+        when(measurements.findLatest(POT_ID)).thenReturn(Optional.of(sample(60.0, 0.0)));
+
+        engine.evaluateOnce();
+
         verify(light).requestAutomatic(eqPot(), org.mockito.ArgumentMatchers.eq(false), anyString());
     }
 

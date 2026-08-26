@@ -48,11 +48,16 @@ class AutomaticControlSelectionTests {
                 "UPDATE pot SET status = 'ONLINE', crop_code = 'lettuce',"
                         + " crop_selected_at = CURRENT_TIMESTAMP WHERE id = ?",
                 POT_ID);
+        jdbcTemplate.update(
+                "UPDATE device SET status = 'ONLINE'"
+                        + " WHERE id = (SELECT device_id FROM pot WHERE id = ?)",
+                POT_ID);
     }
 
     @AfterEach
     void tearDown() {
         jdbcTemplate.update("UPDATE pot SET status = 'OFFLINE', auto_control_enabled = TRUE");
+        jdbcTemplate.update("UPDATE device SET status = 'OFFLINE'");
     }
 
     @Test
@@ -91,6 +96,22 @@ class AutomaticControlSelectionTests {
 
         // A command for it would expire before anything could run it, and the
         // refusal would still be charged to the pot's decision history.
+        assertThat(ids()).doesNotContain(POT_ID);
+    }
+
+    @Test
+    void aPotOnAnOfflineGatewayIsNotOffered() {
+        jdbcTemplate.update(
+                "UPDATE device SET status = 'OFFLINE'"
+                        + " WHERE id = (SELECT device_id FROM pot WHERE id = ?)",
+                POT_ID);
+
+        // Pot presence comes from telemetry arriving and gateway presence from
+        // the MQTT Last Will, so they go stale independently: a gateway can drop
+        // while its pots still read ONLINE from the last sample. Commanding
+        // through a dead gateway publishes into nothing, and the command then
+        // expires charging its granted volume to the pot's daily budget — water
+        // subtracted for a dose that was never even delivered.
         assertThat(ids()).doesNotContain(POT_ID);
     }
 

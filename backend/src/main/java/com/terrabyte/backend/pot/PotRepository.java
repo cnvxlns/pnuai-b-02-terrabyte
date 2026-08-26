@@ -85,10 +85,18 @@ public class PotRepository {
     /**
      * Every pot the rule engine is allowed to act on this pass.
      *
-     * <p>Three conditions, and each one removes a pot the engine could only be
-     * wrong about: no crop means no thresholds to compare against, offline means
-     * a command would expire before anything could run it, and the switch means
-     * its owner has said they will decide.
+     * <p>Four conditions, and each one removes a pot the engine could only be
+     * wrong about: no crop means no thresholds to compare against, an offline
+     * pot or gateway means a command would expire before anything could run it,
+     * and the switch means its owner has said they will decide.
+     *
+     * <p>Pot and gateway presence are both required because they go stale
+     * independently. A pot is marked online when telemetry arrives; a gateway is
+     * marked offline by its MQTT Last Will. A gateway that drops therefore
+     * leaves its pots reading ONLINE from the last sample they sent, and
+     * commanding through it publishes into nothing — the command then expires
+     * charging its granted volume to the pot's daily budget, subtracting water
+     * for a dose that was never delivered.
      *
      * <p>Filtered here rather than in the engine so a deployment with a thousand
      * pots does not load them all into memory to discard most of them.
@@ -96,9 +104,11 @@ public class PotRepository {
     public List<Pot> findAllUnderAutomaticControl() {
         return jdbcTemplate.query(
                 SELECT_COLUMNS
+                        + " JOIN device d ON d.id = p.device_id"
                         + " WHERE p.auto_control_enabled = TRUE"
                         + "   AND p.crop_code IS NOT NULL"
                         + "   AND p.status = 'ONLINE'"
+                        + "   AND d.status = 'ONLINE'"
                         + " ORDER BY p.id",
                 this::mapPot);
     }

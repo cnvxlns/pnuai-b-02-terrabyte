@@ -150,7 +150,9 @@ public class RuleEngine {
      * flip the lamp on every pass while a reading hovered on it.
      */
     private void applyLightRule(Pot pot, TelemetrySample sample) {
-        LocalTime now = LocalTime.now(clock);
+        // Deliberately not LocalTime.now(clock): the shared Clock bean is UTC.
+        // See RuleProperties#photoperiodZone.
+        LocalTime now = LocalTime.ofInstant(clock.instant(), properties.photoperiodZone());
         if (!properties.isDaytime(now)) {
             // Plants need the dark as much as the light. A rule that only chased
             // PPFD would run the lamp all night.
