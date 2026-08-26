@@ -10,7 +10,7 @@ import sqlite3
 import time
 from typing import Callable, Iterator
 
-from .protocol import CommandAck, Event, QueuedMessage
+from .protocol import CommandAck, EdgeIrrigationRecord, Event, QueuedMessage
 
 
 # Telemetry and command outcomes share a durability boundary, but not a retry
@@ -18,11 +18,19 @@ from .protocol import CommandAck, Event, QueuedMessage
 # expired the command and charged water that may not have moved.
 KIND_TELEMETRY = "telemetry"
 KIND_ACK = "ack"
-KINDS = (KIND_TELEMETRY, KIND_ACK)
+
+# Water delivered without a command behind it. Kept apart from acks as well as
+# from telemetry, because this is the queue CloudLink gates CLOUD_ONLINE on:
+# counting acks there would hold the gateway in RESYNC over an ordinary
+# cloud-commanded dose that the server already knows it asked for.
+KIND_CONTROL = "control"
+
+KINDS = (KIND_TELEMETRY, KIND_ACK, KIND_CONTROL)
 
 _RECORD_CODECS: dict[str, Callable[[dict], QueuedMessage]] = {
     KIND_TELEMETRY: Event.from_record,
     KIND_ACK: CommandAck.from_record,
+    KIND_CONTROL: EdgeIrrigationRecord.from_record,
 }
 
 
@@ -74,25 +82,35 @@ class Outbox:
         + "))"
     )
 
+    # The row shape, in one place, because the migration below has to rebuild
+    # the table and a second copy of this list would drift from the first.
+    _COLUMNS = (
+        "event_id", "payload_json", "created_at_epoch", "attempts",
+        "next_attempt_epoch", "status", "last_error", "kind",
+    )
+
+    def _table_ddl(self, name: str) -> str:
+        return f"""
+            CREATE TABLE {name} (
+                event_id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                created_at_epoch REAL NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                next_attempt_epoch REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'dead')),
+                last_error TEXT,
+                {self._KIND_COLUMN}
+            )
+        """
+
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS telemetry_outbox (
-                    event_id TEXT PRIMARY KEY,
-                    payload_json TEXT NOT NULL,
-                    created_at_epoch REAL NOT NULL,
-                    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-                    next_attempt_epoch REAL NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'dead')),
-                    last_error TEXT,
-                    {self._KIND_COLUMN}
-                )
-                """
+                self._table_ddl("IF NOT EXISTS telemetry_outbox")
             )
             self._migrate(connection)
             connection.executescript(
@@ -107,7 +125,10 @@ class Outbox:
             )
 
     def _migrate(self, connection: sqlite3.Connection) -> None:
-        """Add the message kind without rebuilding a populated field queue."""
+        """Bring a database written by an older build up to the current schema.
+
+        Two separate problems, because ``kind`` arrived in two steps.
+        """
 
         columns = {
             row["name"]
@@ -117,6 +138,40 @@ class Outbox:
             connection.execute(
                 f"ALTER TABLE telemetry_outbox ADD COLUMN {self._KIND_COLUMN}"
             )
+            return
+
+        # The column exists, but its CHECK was written when there were only two
+        # kinds, and SQLite cannot alter a constraint in place. This matters more
+        # than it looks: `enqueue` inserts with OR IGNORE, which swallows a CHECK
+        # violation exactly the way it swallows a duplicate id. On a gateway
+        # already in the field every control row would vanish with no error and
+        # no log line, and the failure would only surface as a server that
+        # authorises water on top of water the edge already delivered.
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("telemetry_outbox",),
+        ).fetchone()
+        if table_sql is None:
+            return
+        definition = table_sql["sql"] or ""
+        if all(f"'{kind}'" in definition for kind in KINDS):
+            return
+
+        # The standard SQLite table rebuild. Cheap here — the outbox holds
+        # pending deliveries, not history — and it runs inside the transaction
+        # `_connect` opens, so a power cut leaves the old table intact. Indexes
+        # go with the dropped table and `initialize` recreates them immediately
+        # after this returns.
+        columns_csv = ", ".join(self._COLUMNS)
+        connection.execute(self._table_ddl("telemetry_outbox_migrated"))
+        connection.execute(
+            f"INSERT INTO telemetry_outbox_migrated({columns_csv})"
+            f" SELECT {columns_csv} FROM telemetry_outbox"
+        )
+        connection.execute("DROP TABLE telemetry_outbox")
+        connection.execute(
+            "ALTER TABLE telemetry_outbox_migrated RENAME TO telemetry_outbox"
+        )
 
     def enqueue(
         self, event: QueuedMessage, *, kind: str = KIND_TELEMETRY

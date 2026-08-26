@@ -1,9 +1,11 @@
+from pathlib import Path
 from types import SimpleNamespace
 import json
+import tempfile
 from datetime import datetime, timezone
 import unittest
 
-from terrabyte_edge.outbox import OutboxItem
+from terrabyte_edge.outbox import KIND_CONTROL, OutboxItem
 from terrabyte_edge.protocol import Event
 from terrabyte_edge.publisher import Delivery, DeliveryResult
 from terrabyte_edge.service import BridgeService
@@ -65,11 +67,26 @@ class FakePublisher:
         self.closed = True
 
 
-class ServiceTests(unittest.TestCase):
+class TemporaryDatabase:
+    """A real path for the durable stores a BridgeService always owns.
+
+    ``Settings.database_path`` has no default: a gateway with nowhere to persist
+    its outbox and irrigation history is not a configuration that exists. These
+    fixtures predate the irrigation history and simply had not needed it yet.
+    """
+
+    def databasePath(self) -> Path:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name) / "edge.sqlite3"
+
+
+class ServiceTests(TemporaryDatabase, unittest.TestCase):
     def test_retry_stops_newer_delivery_to_preserve_order(self) -> None:
         outbox = FakeOutbox()
         publisher = FakePublisher()
         settings = SimpleNamespace(
+            database_path=self.databasePath(),
             upload_batch_size=20,
             http_timeout_seconds=1.0,
         )
@@ -89,6 +106,7 @@ class ServiceTests(unittest.TestCase):
         outbox = FakeOutbox()
         publisher = FakePublisher()
         settings = SimpleNamespace(
+            database_path=self.databasePath(),
             upload_batch_size=20,
             http_timeout_seconds=1.0,
         )
@@ -107,7 +125,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class IrrigationSuggestionWiringTests(unittest.TestCase):
+class IrrigationSuggestionWiringTests(TemporaryDatabase, unittest.TestCase):
     """The suggestion has to be attached before the event is queued.
 
     If it were computed at upload time instead, a reading that sat in the outbox
@@ -119,6 +137,7 @@ class IrrigationSuggestionWiringTests(unittest.TestCase):
         from terrabyte_edge.service import BridgeService
 
         settings = SimpleNamespace(
+            database_path=self.databasePath(),
             upload_batch_size=20,
             http_timeout_seconds=1.0,
             crop_context_id="ctx-1",
@@ -191,7 +210,122 @@ class IrrigationSuggestionWiringTests(unittest.TestCase):
 class RecordingOutbox:
     def __init__(self):
         self.events = []
+        self.pending_control = 0
 
     def enqueue(self, event):
         self.events.append(event)
         return True
+
+    def counts(self, *, kind=None):
+        return (self.pending_control if kind == KIND_CONTROL else 0, 0)
+
+
+class AutonomyWiringTests(TemporaryDatabase, unittest.TestCase):
+    """The service is what turns three tested modules into one behaviour."""
+
+    def build(self, **overrides):
+        settings = SimpleNamespace(
+            database_path=self.databasePath(),
+            upload_batch_size=20,
+            upload_interval_seconds=0.01,
+            http_timeout_seconds=1.0,
+            crop_context_id="ctx-1",
+            expected_node_id="node-1",
+            device_id="orangepi-pro-01",
+            clock_minimum_utc=overrides.get(
+                "clock_minimum_utc", datetime(2025, 1, 1, tzinfo=timezone.utc)
+            ),
+            pot_substrate_ml={},
+            pot_crop_codes={},
+            substrate_volume_ml_for=lambda node: None,
+            crop_code_for=lambda node: None,
+            command_relay_enabled=False,
+        )
+        service = BridgeService(
+            settings,
+            outbox=RecordingOutbox(),
+            publisher=SimpleNamespace(close=lambda: None),
+            serial_reader=object(),
+        )
+        service.irrigation_history.initialize()
+        return service
+
+    def line(self, **overrides):
+        body = {
+            "message_type": "telemetry",
+            "protocol_version": 1,
+            "node_id": "node-1",
+            "sequence": 1,
+            "uptime_ms": 1000,
+            "air_temperature_c": 24.0,
+            "relative_humidity_pct": 45.0,
+            "ppfd_umol_m2_s": 300.0,
+            "soil_temperature_c": 21.0,
+            "soil_moisture_pct": 12.0,
+        }
+        body.update(overrides)
+        return json.dumps(body).encode()
+
+    def test_a_soil_reading_reaches_autonomy(self) -> None:
+        service = self.build()
+
+        service._ingest_line(self.line())
+
+        # Autonomy decides on the newest sample; if nothing feeds it, the
+        # emergency rule is a module nobody ever calls.
+        self.assertIn("node-1", service.autonomy._readings)
+
+    def test_a_reading_with_no_soil_probe_is_not_offered_to_autonomy(self) -> None:
+        service = self.build()
+
+        service._ingest_line(self.line(soil_moisture_pct=None, soil_temperature_c=None))
+
+        # The whole envelope turns on soil moisture. A node with no probe has
+        # nothing autonomy can be right about.
+        self.assertEqual(service.autonomy._readings, {})
+
+    def test_autonomy_does_nothing_while_the_cloud_is_alive(self) -> None:
+        service = self.build()
+        service._ingest_line(self.line())
+        service.cloud_link.record_heartbeat()
+
+        self.assertIsNone(service._autonomy_tick())
+
+    def test_autonomy_runs_once_the_cloud_has_been_quiet(self) -> None:
+        service = self.build()
+        service._ingest_line(self.line())
+        service.cloud_link.record_heartbeat()
+        service.cloud_link._started_at -= 3_600.0
+        service.cloud_link._last_heartbeat_at -= 3_600.0
+
+        outcome = service._autonomy_tick()
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.node_id, "node-1")
+
+    def test_the_control_backlog_holds_the_link_out_of_cloud_online(self) -> None:
+        from terrabyte_edge.cloud_link import CloudLinkState
+
+        service = self.build()
+        service.outbox.pending_control = 1
+        for _ in range(3):
+            service.cloud_link.record_heartbeat()
+            service.cloud_link._streak_started_at -= 30.0
+
+        service._refresh_link()
+
+        self.assertEqual(service.cloud_link.state, CloudLinkState.RESYNC)
+
+    def test_a_clock_behind_the_configured_minimum_holds_everything(self) -> None:
+        from terrabyte_edge.cloud_link import CloudLinkState
+
+        service = self.build(
+            clock_minimum_utc=datetime(2099, 1, 1, tzinfo=timezone.utc)
+        )
+
+        service._refresh_link()
+
+        # Every gate in the safety envelope is a comparison of timestamps, so a
+        # gateway that booted before NTP settled cannot evaluate any of them.
+        self.assertEqual(service.cloud_link.state, CloudLinkState.SAFE_HOLD)
+        self.assertIsNone(service._autonomy_tick())

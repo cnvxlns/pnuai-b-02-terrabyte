@@ -48,6 +48,7 @@ class MqttCommandDispatcherTests {
 
     private final ObjectMapper objectMapper = Jackson2ObjectMapperBuilder.json().build();
 
+    private GatewayLinkStateRegistry linkStates;
     private MqttClient mqttClient;
     private MqttTopic mqttTopic;
     private CommandTargetResolver targetResolver;
@@ -66,9 +67,39 @@ class MqttCommandDispatcherTests {
                 .thenReturn(Optional.of(
                         new CommandTarget(POT_ID, "orangepi-pro-01", "terrabyte-node-01")));
 
+        linkStates = new GatewayLinkStateRegistry();
         dispatcher = new MqttCommandDispatcher(
-                mqttClient, PROPERTIES, objectMapper, targetResolver,
+                mqttClient, PROPERTIES, objectMapper, targetResolver, linkStates,
                 Duration.ofSeconds(5), Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    @Test
+    void aResyncingGatewayIsNotSentCommands() {
+        linkStates.record("orangepi-pro-01", "RESYNC");
+
+        assertThat(dispatcher.dispatch(grant(NOW.plusSeconds(90)))).isFalse();
+
+        // The gateway is still holding irrigation records this server has not
+        // seen, so the budget this command was authorised against is stale.
+        // Publishing anyway is how the pot gets watered twice.
+        verifyNoInteractions(mqttClient);
+    }
+
+    @Test
+    void aGatewayThatFinishedResyncingIsSentCommandsAgain() {
+        linkStates.record("orangepi-pro-01", "RESYNC");
+        linkStates.record("orangepi-pro-01", "CLOUD_ONLINE");
+
+        assertThat(dispatcher.dispatch(grant(NOW.plusSeconds(90)))).isTrue();
+    }
+
+    @Test
+    void anAutonomousGatewayIsStillSentCommands() {
+        linkStates.record("orangepi-pro-01", "EDGE_AUTONOMOUS");
+
+        // It believes we are gone. A command arriving is what corrects it, and
+        // its own envelope is far narrower than anything we would authorise.
+        assertThat(dispatcher.dispatch(grant(NOW.plusSeconds(90)))).isTrue();
     }
 
     @Test

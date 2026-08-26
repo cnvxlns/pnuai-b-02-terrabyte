@@ -113,12 +113,14 @@ class IrrigationDecider:
         *,
         limits: EnvelopeLimits | None = None,
         volume_ml: float = FIXED_VOLUME_ML,
+        require_model: bool = True,
     ) -> None:
         if volume_ml <= 0.0:
             raise ValueError("volume_ml must be positive")
         self._model = model
         self._limits = limits or EnvelopeLimits()
         self._volume_ml = volume_ml
+        self._require_model = require_model
 
     @property
     def limits(self) -> EnvelopeLimits:
@@ -167,10 +169,23 @@ class IrrigationDecider:
             )
 
         if self._model is None:
+            if self._require_model:
+                return IrrigationDecision(
+                    irrigate=False,
+                    volume_ml=0.0,
+                    verdict=Verdict.MODEL_UNAVAILABLE,
+                    envelope_allows=True,
+                )
+            # Autonomous operation. The forest is a suppressor, never a trigger,
+            # so its absence removes a veto rather than a reason — the envelope
+            # above has already established that this pot is genuinely dry, past
+            # its interval and inside its budget. Withholding here would make a
+            # missing model file look identical to a healthy plant, and the
+            # cloud that would otherwise notice is by definition unreachable.
             return IrrigationDecision(
-                irrigate=False,
-                volume_ml=0.0,
-                verdict=Verdict.MODEL_UNAVAILABLE,
+                irrigate=True,
+                volume_ml=self._volume_ml,
+                verdict=Verdict.IRRIGATE,
                 envelope_allows=True,
             )
 

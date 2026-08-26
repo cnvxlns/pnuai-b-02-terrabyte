@@ -9,7 +9,7 @@ import threading
 import unittest
 
 from terrabyte_edge.mqtt_publisher import MqttPublisher
-from terrabyte_edge.protocol import Event
+from terrabyte_edge.protocol import EdgeIrrigationRecord, Event
 from terrabyte_edge.publisher import Delivery
 
 
@@ -112,8 +112,18 @@ class FakeMqttClient:
 
         self.on_publish(self, None, mid, reason_code)
 
-    def simulate_message(self, payload: bytes, *, retain: bool = False):
-        message = type("Message", (), {"payload": payload, "retain": retain})()
+    def simulate_message(
+        self, payload: bytes, *, retain: bool = False, topic: str | None = None
+    ):
+        message = type(
+            "Message",
+            (),
+            {
+                "payload": payload,
+                "retain": retain,
+                "topic": topic or "tb/v2/orangepi-pro-01/dn/command",
+            },
+        )()
         self.on_message(self, None, message)
 
 
@@ -521,3 +531,98 @@ class SelfRecoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DownlinkRoutingTests(unittest.TestCase):
+    """Two downlink topics share one on_message, so routing has to be explicit."""
+
+    HEARTBEAT_TOPIC = "tb/v2/orangepi-pro-01/dn/heartbeat"
+    COMMAND_TOPIC = "tb/v2/orangepi-pro-01/dn/command"
+
+    def setUp(self) -> None:
+        self.client = FakeMqttClient()
+        self.publisher = make_publisher(self.client)
+        self.commands: list[bytes] = []
+        self.heartbeats = 0
+        self.publisher.subscribe_commands(lambda payload, retained: self.commands.append(payload))
+        self.publisher.subscribe_heartbeats(self.countHeartbeat)
+
+    def countHeartbeat(self) -> None:
+        self.heartbeats += 1
+
+    def test_both_downlink_topics_are_subscribed_on_connect(self) -> None:
+        self.client.simulate_connect()
+
+        topics = [topic for topic, _qos in self.client.subscriptions]
+        # Renewed together after a reconnect. A blip that restored commands but
+        # not heartbeats would leave the gateway believing the cloud is dead
+        # while it is actively being commanded.
+        self.assertIn(self.COMMAND_TOPIC, topics)
+        self.assertIn(self.HEARTBEAT_TOPIC, topics)
+
+    def test_a_heartbeat_does_not_reach_the_command_relay(self) -> None:
+        self.client.simulate_message(b'{"message_type":"heartbeat"}', topic=self.HEARTBEAT_TOPIC)
+
+        self.assertEqual(self.heartbeats, 1)
+        # Handing a heartbeat to the relay would make it publish a rejected ack
+        # for a command_id that does not exist.
+        self.assertEqual(self.commands, [])
+
+    def test_a_command_does_not_count_as_a_heartbeat(self) -> None:
+        self.client.simulate_message(b'{"command_id":"c-1"}', topic=self.COMMAND_TOPIC)
+
+        self.assertEqual(self.commands, [b'{"command_id":"c-1"}'])
+        # A command is not proof the application is alive: the broker replays
+        # nothing, but a queued command can outlive the process that sent it.
+        self.assertEqual(self.heartbeats, 0)
+
+
+class StatusStateTests(unittest.TestCase):
+    def test_retained_status_carries_the_link_state(self) -> None:
+        client = FakeMqttClient()
+        publisher = make_publisher(client, state_provider=lambda: "RESYNC")
+
+        client.simulate_connect()
+
+        topic, payload, qos, retain = client.published[0]
+        body = json.loads(payload)
+        self.assertEqual(topic, "tb/v2/orangepi-pro-01/up/status")
+        self.assertTrue(body["online"])
+        # The backend reads this to decide whether to publish commands at all.
+        self.assertEqual(body["state"], "RESYNC")
+        self.assertTrue(retain)
+        self.assertEqual(qos, 1)
+
+    def test_status_without_a_provider_still_reports_online(self) -> None:
+        client = FakeMqttClient()
+        publisher = make_publisher(client)
+
+        client.simulate_connect()
+
+        body = json.loads(client.published[0][1])
+        self.assertTrue(body["online"])
+        self.assertNotIn("state", body)
+
+
+class EdgeIrrigationPublishTests(unittest.TestCase):
+    def test_a_record_goes_to_its_own_topic_unretained(self) -> None:
+        client = FakeMqttClient()
+        publisher = make_publisher(client)
+
+        result = publisher.send_edge_irrigation(
+            EdgeIrrigationRecord(
+                record_id="rec-1",
+                node_id="node-1",
+                volume_ml=60.0,
+                dispensed_at_utc="2026-08-27T01:02:03Z",
+            )
+        )
+        client.simulate_puback(client.published[-1] and 1)
+
+        topic, payload, qos, retain = client.published[-1]
+        self.assertEqual(topic, "tb/v2/orangepi-pro-01/up/irrigation")
+        self.assertEqual(qos, 1)
+        # Retaining it would replay one dose to every future subscriber, and the
+        # server counts what it receives against the pot's daily budget.
+        self.assertFalse(retain)
+        self.assertEqual(json.loads(payload)["origin"], "EDGE_FALLBACK")

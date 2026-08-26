@@ -35,7 +35,11 @@ import org.springframework.context.annotation.Configuration;
 class MqttCommandDispatchWiringTests {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
-            .withUserConfiguration(IrrigationConfig.class, MqttConfig.class, StubsConfig.class)
+            .withUserConfiguration(
+                    IrrigationConfig.class, MqttConfig.class, StubsConfig.class,
+                    // Component-scanned in the running application; this slice
+                    // builds its context by hand, so it has to be named.
+                    GatewayLinkStateRegistry.class)
             .withPropertyValues(
                     "app.mqtt.enabled=true",
                     "app.mqtt.url=tcp://localhost:1883",
@@ -75,7 +79,11 @@ class MqttCommandDispatchWiringTests {
         // MqttClient, so the whole MqttConfig class is skipped and the honest
         // logging fallback remains.
         new ApplicationContextRunner()
-                .withUserConfiguration(IrrigationConfig.class, MqttConfig.class, StubsConfig.class)
+                .withUserConfiguration(
+                    IrrigationConfig.class, MqttConfig.class, StubsConfig.class,
+                    // Component-scanned in the running application; this slice
+                    // builds its context by hand, so it has to be named.
+                    GatewayLinkStateRegistry.class)
                 .withPropertyValues(
                         "app.mqtt.enabled=false",
                         "app.mqtt.command-dispatch.enabled=true")

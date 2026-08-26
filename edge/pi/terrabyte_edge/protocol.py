@@ -544,6 +544,59 @@ class CommandAck:
         return cls(**record)
 
 
-# What the durable queue can hold. Two families, two dataclasses, and the outbox
-# picks the decoder from the row's ``kind`` — see outbox._RECORD_CODECS.
-QueuedMessage = Event | CommandAck
+@dataclass(frozen=True)
+class EdgeIrrigationRecord:
+    """Water this gateway delivered on its own, owed to the server.
+
+    Not an ack: no command_id exists because no command was ever issued. The
+    backend records it as ``device_command(origin='EDGE_FALLBACK',
+    state='COMPLETED')``, which is the shape its daily-budget query already sums
+    over — so the server counts autonomous water with no new budget code.
+
+    Queued on its own outbox ``kind``, and that separation is the point. Until
+    every one of these has landed, ``CloudLink`` refuses CLOUD_ONLINE: a server
+    that does not know what already went in will authorise more.
+    """
+
+    record_id: str
+    node_id: str
+    volume_ml: float
+    dispensed_at_utc: str
+
+    @property
+    def event_id(self) -> str:
+        """Outbox primary key, derived exactly as :class:`CommandAck` derives its own.
+
+        ``record_id`` is already the irrigation_history primary key, so a
+        re-enqueue after a restart collapses onto the same row and the outbox's
+        ``INSERT OR IGNORE`` makes it a no-op. A random id here would report one
+        dose twice and inflate the server's budget against the pot.
+        """
+
+        return f"edge_irrigation:{self.record_id}"
+
+    def payload(self, *, gateway_id: str) -> dict[str, object]:
+        return {
+            "schema_version": 2,
+            "message_type": "edge_irrigation",
+            "gateway_id": gateway_id,
+            "record_id": self.record_id,
+            "node_id": self.node_id,
+            "volume_ml": self.volume_ml,
+            "dispensed_at": self.dispensed_at_utc,
+            # Stated rather than inferred. The server must not have to guess
+            # that an unsolicited delivery was the fallback path.
+            "origin": "EDGE_FALLBACK",
+        }
+
+    def to_record(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> "EdgeIrrigationRecord":
+        return cls(**record)
+
+
+# What the durable queue can hold. Three families, three dataclasses, and the
+# outbox picks the decoder from the row's ``kind`` — see outbox._RECORD_CODECS.
+QueuedMessage = Event | CommandAck | EdgeIrrigationRecord

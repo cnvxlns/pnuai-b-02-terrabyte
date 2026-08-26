@@ -21,12 +21,13 @@ from terrabyte_edge.command_relay import (
     CommandError,
     CommandJournal,
     CommandRelay,
+    STOP_PI_LINK_HELD,
     mqtt_reason,
     parse_command,
     serial_command_frame,
 )
 from terrabyte_edge.loopback import ABS_MAX_RUN_MS
-from terrabyte_edge.outbox import KIND_ACK
+from terrabyte_edge.outbox import KIND_ACK, KIND_CONTROL
 from terrabyte_edge.protocol import (
     ProtocolError,
     epoch_to_iso8601,
@@ -113,14 +114,18 @@ class FakeTransport:
 class RecordingOutbox:
     def __init__(self) -> None:
         self.acks = []
+        self.control = []
         self.seen: set[str] = set()
 
     def enqueue(self, message, *, kind: str) -> bool:
-        assert kind == KIND_ACK
+        assert kind in (KIND_ACK, KIND_CONTROL)
         if message.event_id in self.seen:
             return False
         self.seen.add(message.event_id)
-        self.acks.append(message)
+        if kind == KIND_CONTROL:
+            self.control.append(message)
+        else:
+            self.acks.append(message)
         return True
 
     def phases(self) -> list[str]:
@@ -1030,3 +1035,125 @@ class LightKeepaliveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LinkGateTests(unittest.TestCase):
+    """A gateway that owes the server records must not act on its commands."""
+
+    def setUp(self) -> None:
+        self.fixture = RelayFixture(self)
+
+    def test_a_command_reaches_the_node_while_the_link_accepts_them(self) -> None:
+        self.fixture.relay._process(command())
+
+        (frame,) = self.fixture.reader.commands()
+        self.assertEqual(frame["id"], "01J8F3QK2M7X9ZB4CDEFGH")
+        # The firmware answers for itself; the relay does not pre-empt it.
+        self.assertEqual(self.fixture.outbox.acks, [])
+
+    def test_a_command_is_rejected_while_the_link_refuses_them(self) -> None:
+        self.fixture.relay.set_link_gate(lambda: False)
+
+        self.fixture.relay._process(command())
+
+        # Rejected rather than dropped: the backend holds the command in ISSUED
+        # and charges its granted volume to the daily budget until something
+        # terminal arrives, so silence here costs the pot water it never got.
+        self.assertEqual(self.fixture.outbox.phases(), ["rejected"])
+        self.assertEqual(self.fixture.outbox.acks[-1].stop_cause, STOP_PI_LINK_HELD)
+
+    def test_the_gate_does_not_touch_the_serial_port(self) -> None:
+        self.fixture.relay.set_link_gate(lambda: False)
+
+        self.fixture.relay._process(command())
+
+        self.assertEqual(self.fixture.reader.written, [])
+
+
+class LocalDoseTests(unittest.TestCase):
+    """Water the gateway decides on itself, delivered through the same path.
+
+    Reusing the relay rather than writing a second serial path is deliberate:
+    the framing, the interlock and the dead-man are the most safety-critical
+    code here, and a second copy of them would drift from the first.
+    """
+
+    NODE_ID = NODE
+
+    def setUp(self) -> None:
+        self.fixture = RelayFixture(self)
+
+    def begin(self, volume_ml: float = 60.0) -> str:
+        command_id = self.fixture.relay.begin_local_dose(
+            self.NODE_ID, volume_ml, max_runtime_ms=61_000
+        )
+        self.assertIsNotNone(command_id)
+        return command_id
+
+    def firmware(self, command_id: str, **overrides) -> None:
+        message = {"t": "ack", "id": command_id, "ph": "completed", "ms": 61_000}
+        message.update(overrides)
+        self.fixture.relay.handle_serial_ack(PORT, message)
+
+    def test_a_local_dose_reaches_the_node(self) -> None:
+        self.begin()
+
+        (frame,) = self.fixture.reader.commands()
+        self.assertEqual(frame["act"], "pump")
+        self.assertEqual(frame["ml"], 60)
+
+    def test_a_local_dose_publishes_no_ack_to_the_server(self) -> None:
+        command_id = self.begin()
+
+        self.firmware(command_id)
+
+        # The backend never issued this command_id, so an ack for it would be
+        # dropped as an ack for an unknown command — noise at best, and at worst
+        # a warning that hides a real one.
+        self.assertEqual(self.fixture.outbox.acks, [])
+
+    def test_a_completed_local_dose_becomes_a_control_record(self) -> None:
+        command_id = self.begin()
+
+        self.firmware(command_id)
+
+        (control,) = self.fixture.outbox.control
+        self.assertEqual(control.node_id, self.NODE_ID)
+        self.assertEqual(control.volume_ml, 60.0)
+
+    def test_await_reports_what_the_firmware_actually_delivered(self) -> None:
+        command_id = self.begin()
+
+        # A run the firmware cut in half: half the commanded runtime, so half
+        # the water. _estimated_ml prorates it.
+        self.firmware(command_id, ms=30_500, r="max_runtime")
+
+        delivered = self.fixture.relay.await_local_dose(command_id, timeout=0.0)
+        self.assertEqual(delivered, 30.0)
+        self.assertEqual(self.fixture.outbox.control[0].volume_ml, 30.0)
+
+    def test_a_rejected_local_dose_delivers_and_records_nothing(self) -> None:
+        command_id = self.begin()
+
+        self.fixture.relay.handle_serial_ack(
+            PORT, {"t": "ack", "id": command_id, "ph": "rejected", "r": "cooldown"}
+        )
+
+        self.assertEqual(self.fixture.relay.await_local_dose(command_id, timeout=0.0), 0.0)
+        # Nothing moved, so there is nothing the server needs to know about and
+        # nothing to charge the pot's budget for.
+        self.assertEqual(self.fixture.outbox.control, [])
+
+    def test_a_firmware_that_never_answers_reports_no_delivery(self) -> None:
+        command_id = self.begin()
+
+        self.assertEqual(self.fixture.relay.await_local_dose(command_id, timeout=0.0), 0.0)
+        self.assertEqual(self.fixture.outbox.control, [])
+
+    def test_an_unknown_node_cannot_be_dosed(self) -> None:
+        self.assertIsNone(
+            self.fixture.relay.begin_local_dose(
+                "no-such-node", 60.0, max_runtime_ms=61_000
+            )
+        )
+        self.assertEqual(self.fixture.reader.written, [])

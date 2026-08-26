@@ -49,6 +49,7 @@ public class MqttCommandDispatcher implements CommandDispatcher {
     private final MqttProperties mqttProperties;
     private final ObjectMapper objectMapper;
     private final CommandTargetResolver targetResolver;
+    private final GatewayLinkStateRegistry linkStates;
     private final Duration publishTimeout;
     private final Clock clock;
 
@@ -57,12 +58,14 @@ public class MqttCommandDispatcher implements CommandDispatcher {
             MqttProperties mqttProperties,
             ObjectMapper objectMapper,
             CommandTargetResolver targetResolver,
+            GatewayLinkStateRegistry linkStates,
             Duration publishTimeout,
             Clock clock) {
         this.mqttClient = mqttClient;
         this.mqttProperties = mqttProperties;
         this.objectMapper = objectMapper;
         this.targetResolver = targetResolver;
+        this.linkStates = linkStates;
         this.publishTimeout = publishTimeout;
         this.clock = clock;
     }
@@ -143,6 +146,25 @@ public class MqttCommandDispatcher implements CommandDispatcher {
     }
 
     private boolean publish(CommandMessage command, CommandTarget target) {
+        if (!linkStates.acceptsCommands(target.gatewayId())) {
+            // The gateway is holding irrigation records this server has not
+            // received (RESYNC), or has declared that nothing may run at all
+            // (SAFE_HOLD). Either way the budget this command was authorised
+            // against is not the budget that will apply when it lands, and
+            // publishing anyway is exactly how a pot gets watered twice.
+            //
+            // Withheld rather than delayed: the caller is told dispatched=false,
+            // the command's own TTL retires it, and the rule engine's next pass
+            // will re-decide against a budget that by then includes the water
+            // already in the soil.
+            LOGGER.warn(
+                    "not publishing, gateway is holding command_id={} pot_id={} "
+                            + "gateway_id={} state={}",
+                    command.commandId(), command.potId(), target.gatewayId(),
+                    linkStates.stateOf(target.gatewayId()));
+            return false;
+        }
+
         String topic;
         byte[] payload;
         try {

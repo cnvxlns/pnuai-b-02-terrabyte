@@ -3,18 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import json
 import logging
+import math
+import time
 from pathlib import Path
 from threading import Event, Thread
 from typing import Callable, Sequence
 
+from .autonomy import AUTONOMOUS_VOLUME_ML, EdgeAutonomy, Reading
 from .backend import HttpPublisher
-from .command_relay import CommandJournal, CommandRelay
+from .cloud_link import (
+    DEFAULT_AUTONOMY_AFTER_SECONDS,
+    DEFAULT_DEGRADE_AFTER_SECONDS,
+    DEFAULT_RECOVER_AFTER_SECONDS,
+    CloudLink,
+)
+from .command_relay import PUMP_ABS_MAX_MS, CommandJournal, CommandRelay
 from .config import Settings
+from .irrigation import EnvelopeLimits, IrrigationDecider, RandomForestClassifier
 from .irrigation.volume import MODEL_VERSION, suggest_volume_ml
+from .irrigation_history import IrrigationHistory
 from .mqtt_publisher import MqttPublisher
-from .outbox import KIND_ACK, KIND_TELEMETRY, Outbox, OutboxFullError
+from .outbox import KIND_ACK, KIND_CONTROL, KIND_TELEMETRY, Outbox, OutboxFullError
 from .protocol import (
     Event as TelemetryEvent,
     IrrigationSuggestion,
@@ -29,8 +41,45 @@ from .state import DEFAULT_SNAPSHOT_PATH, GatewayState, write_snapshot
 
 LOGGER = logging.getLogger(__name__)
 
+# Measured on the bench rig, and the same number the backend uses to size a
+# runtime (`IrrigationProperties.BENCH_RIG_STEADY_STATE_FLOW_ML_PER_S`). There is
+# no flow meter, so this is how many millilitres a second of pump time is worth.
+DEFAULT_PUMP_FLOW_ML_PER_S = 0.98
 
-def _build_publisher(settings: Settings) -> Publisher:
+
+def _runtime_ms_for(volume_ml: float, flow_ml_per_s: float) -> int:
+    """Pump milliseconds for a dose, rounded up and clamped to the hard limit.
+
+    Rounded up because the firmware stops on whichever of volume or runtime
+    arrives first: a runtime shaved short turns every dose into a clamped one.
+    """
+
+    if flow_ml_per_s <= 0.0:
+        flow_ml_per_s = DEFAULT_PUMP_FLOW_ML_PER_S
+    return min(PUMP_ABS_MAX_MS, int(math.ceil(volume_ml / flow_ml_per_s * 1000.0)))
+
+
+def _load_autonomy_model() -> RandomForestClassifier | None:
+    """The suppression-only forest, or None if the artifact is unusable.
+
+    Never raises. A model that will not load must not stop the service from
+    starting, because the deterministic emergency rule does not need it — see
+    ``require_model`` in terrabyte_edge.irrigation.decision.
+    """
+
+    try:
+        return RandomForestClassifier.load()
+    except Exception:
+        LOGGER.warning(
+            "autonomy forest unavailable; the deterministic rule runs alone",
+            exc_info=True,
+        )
+        return None
+
+
+def _build_publisher(
+    settings: Settings, *, state_provider=None
+) -> Publisher:
     if settings.transport == "mqtt":
         return MqttPublisher(
             host=settings.mqtt_host,
@@ -43,6 +92,9 @@ def _build_publisher(settings: Settings) -> Publisher:
             tls_ca_cert=settings.mqtt_tls_ca_cert,
             keepalive_seconds=settings.mqtt_keepalive_seconds,
             publish_timeout_seconds=settings.mqtt_publish_timeout_seconds,
+            # The retained up/status body carries the link state, which the
+            # backend reads before deciding to publish a command at all.
+            state_provider=state_provider,
         )
     return HttpPublisher(
         telemetry_url=settings.telemetry_url,
@@ -76,7 +128,22 @@ class BridgeService:
             retry_max_seconds=settings.retry_max_seconds,
             max_rows=settings.outbox_max_rows,
         )
-        self.publisher = publisher or _build_publisher(settings)
+        # Built before the publisher, because the publisher's retained status
+        # payload asks it for the link state on every connect.
+        self.cloud_link = CloudLink(
+            degrade_after_seconds=getattr(
+                settings, "cloud_degrade_after_seconds", DEFAULT_DEGRADE_AFTER_SECONDS
+            ),
+            autonomy_after_seconds=getattr(
+                settings, "cloud_autonomy_after_seconds", DEFAULT_AUTONOMY_AFTER_SECONDS
+            ),
+            recover_after_seconds=getattr(
+                settings, "cloud_recover_after_seconds", DEFAULT_RECOVER_AFTER_SECONDS
+            ),
+        )
+        self.publisher = publisher or _build_publisher(
+            settings, state_provider=lambda: self.cloud_link.state.value
+        )
 
         if serial_readers is not None:
             readers = list(serial_readers)
@@ -115,6 +182,30 @@ class BridgeService:
         self.command_relay = (
             command_relay if command_relay is not None else self._build_command_relay()
         )
+        if self.command_relay is not None:
+            # Cloud commands are refused in RESYNC and SAFE_HOLD. Local doses
+            # are not: they go through begin_local_dose, which never asks.
+            self.command_relay.set_link_gate(
+                lambda: self.cloud_link.accepts_cloud_commands
+            )
+        self.irrigation_history = IrrigationHistory(self.settings.database_path)
+        self.autonomy = EdgeAutonomy(
+            link=self.cloud_link,
+            decider=IrrigationDecider(
+                _load_autonomy_model(),
+                limits=EnvelopeLimits.autonomous(),
+                volume_ml=AUTONOMOUS_VOLUME_ML,
+                # A missing artifact removes a veto rather than becoming an
+                # unexplained refusal; the forest can only suppress.
+                require_model=False,
+            ),
+            history=self.irrigation_history,
+            dispense=self._dispense_autonomously,
+        )
+        self._last_published_state: str | None = None
+        subscribe = getattr(self.publisher, "subscribe_heartbeats", None)
+        if callable(subscribe):
+            subscribe(self.cloud_link.record_heartbeat)
 
     def _build_command_relay(self) -> CommandRelay | None:
         """Build the relay only for a transport with a real command downlink."""
@@ -166,10 +257,32 @@ class BridgeService:
             # accepted command silently unsafe or untraceable.
             workers.extend(self.command_relay.workers())
             workers.append(("ack-upload", self._ack_upload_loop))
+            # Records the server has not seen hold the gateway in RESYNC, so
+            # this drain is what lets it ever reach CLOUD_ONLINE again.
+            #
+            # Guarded like the relay itself: HTTP has no edge-irrigation
+            # endpoint, and a worker that raises on its first pass would take
+            # the whole service down with it — every entry here is critical, so
+            # its death is a restart, and a restart drops telemetry from every
+            # pot on a loop.
+            if callable(getattr(self.publisher, "send_edge_irrigation", None)):
+                workers.append(("control-upload", self._control_upload_loop))
+            else:
+                LOGGER.warning(
+                    "transport %s cannot report autonomous irrigation; the server "
+                    "will not learn about doses delivered while it was unreachable",
+                    getattr(self.settings, "transport", "?"),
+                )
+        # Last, and unconditional: the emergency rule is the one thing that has
+        # to keep working when everything above it has stopped.
+        workers.append(("edge-autonomy", self._autonomy_loop))
         return workers
 
     def start(self) -> None:
         self.outbox.initialize()
+        # Same file as the outbox, separate table: one fsync domain, so a power
+        # cut cannot leave a queued record with no matching volume.
+        self.irrigation_history.initialize()
         pending, dead = self.outbox.counts()
         LOGGER.info("outbox ready pending=%d dead=%d", pending, dead)
 
@@ -334,6 +447,7 @@ class BridgeService:
             node_id=event.node_id,
             measurements=self._measurements(event),
         )
+        self._offer_to_autonomy(event)
         try:
             # Telemetry remains the default kind for compatibility with every
             # outbox row created before this port.
@@ -350,6 +464,126 @@ class BridgeService:
                 event.node_id,
                 event.sequence,
             )
+
+    def _offer_to_autonomy(self, event: TelemetryEvent) -> None:
+        """Hand the newest reading to the emergency rule.
+
+        Offered at ingest rather than read back from the outbox, for the same
+        reason the irrigation suggestion is computed here: a sample that sat in
+        the queue through an outage is not evidence about the pot right now, and
+        the envelope's freshness gate would reject it anyway.
+
+        Skipped when the soil probe said nothing. The whole envelope turns on
+        soil moisture, so a node without one has nothing autonomy can be right
+        about, and inventing a value would be inventing a reason to water.
+        """
+
+        if event.soil_moisture_pct is None or event.soil_temperature_c is None:
+            return
+        self.autonomy.observe(
+            Reading(
+                node_id=event.node_id,
+                observed_at_epoch=time.time(),
+                soil_moisture_pct=event.soil_moisture_pct,
+                soil_temperature_c=event.soil_temperature_c,
+                air_temperature_c=event.air_temperature_c,
+                relative_humidity_pct=event.relative_humidity_pct,
+                ppfd_umol_m2_s=event.ppfd_umol_m2_s,
+            )
+        )
+
+    def _autonomy_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self._refresh_link()
+                self._autonomy_tick()
+            except Exception:
+                # This thread is in _critical_workers: letting it die restarts
+                # the service and drops telemetry from every pot.
+                LOGGER.exception("autonomy tick failed; retrying on the next pass")
+            self.stop_event.wait(
+                getattr(self.settings, "autonomy_interval_seconds", 30.0)
+            )
+
+    def _refresh_link(self) -> None:
+        """Feed the state machine everything it cannot observe for itself."""
+
+        if self._clock_is_unusable():
+            self.cloud_link.hold("clock behind TB_CLOCK_MINIMUM_UTC")
+        else:
+            self.cloud_link.release()
+
+        self.cloud_link.set_control_backlog(self._pending_control())
+        state = self.cloud_link.evaluate().value
+        if state != self._last_published_state:
+            LOGGER.info("cloud link state %s -> %s", self._last_published_state, state)
+            self._last_published_state = state
+            self.state.add_event("info", f"클라우드 연결 상태: {state}")
+            publish = getattr(self.publisher, "publish_status", None)
+            if callable(publish):
+                # Republished rather than waited for: the backend suppresses
+                # command publishing while we are in RESYNC, and it can only do
+                # that if the retained status is current.
+                publish()
+
+    def _clock_is_unusable(self) -> bool:
+        minimum = getattr(self.settings, "clock_minimum_utc", None)
+        if minimum is None:
+            return False
+        return datetime.now(timezone.utc) < minimum
+
+    def _pending_control(self) -> int:
+        counts = getattr(self.outbox, "counts", None)
+        if not callable(counts):
+            return 0
+        try:
+            pending, _dead = counts(kind=KIND_CONTROL)
+        except TypeError:
+            return 0
+        return int(pending)
+
+    def _autonomy_tick(self):
+        return self.autonomy.tick()
+
+    def _dispense_autonomously(self, node_id: str, volume_ml: float) -> float:
+        """Deliver an emergency dose and report what actually came out.
+
+        Returns 0.0 with no relay, which is honest rather than defensive: a
+        transport with no command downlink has no pump to reach, and autonomy
+        must record nothing when nothing moved.
+        """
+
+        if self.command_relay is None:
+            LOGGER.error(
+                "autonomy wanted %0.1f mL for node_id=%s but no command relay exists",
+                volume_ml, node_id,
+            )
+            return 0.0
+        max_runtime_ms = _runtime_ms_for(
+            volume_ml,
+            getattr(self.settings, "pump_flow_ml_per_s", DEFAULT_PUMP_FLOW_ML_PER_S),
+        )
+        command_id = self.command_relay.begin_local_dose(
+            node_id, volume_ml, max_runtime_ms=max_runtime_ms
+        )
+        if command_id is None:
+            return 0.0
+        # The firmware's own answer, waited for rather than assumed. The dose is
+        # only history once something downstream says it ran.
+        return self.command_relay.await_local_dose(
+            command_id,
+            timeout=(max_runtime_ms / 1000.0)
+            + getattr(self.settings, "command_deadman_grace_seconds", 5.0),
+        )
+
+    def _control_upload_loop(self) -> None:
+        while not self.stop_event.is_set():
+            uploaded = self._upload_once(
+                KIND_CONTROL,
+                send=self.publisher.send_edge_irrigation,
+            )
+            if uploaded == 0:
+                self.stop_event.wait(self.settings.upload_interval_seconds)
 
     def _upload_loop(self) -> None:
         while not self.stop_event.is_set():

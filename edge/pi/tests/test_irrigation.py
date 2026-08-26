@@ -109,6 +109,39 @@ class EnvelopeTests(unittest.TestCase):
         decision = IrrigationDecider(None).decide(features())
         self.assertFalse(decision.irrigate)
         self.assertEqual(decision.verdict, Verdict.MODEL_UNAVAILABLE)
+
+    def test_without_require_model_the_envelope_alone_may_irrigate(self) -> None:
+        # The autonomous fallback: with the cloud unreachable, a gateway whose
+        # model file is missing or schema-mismatched must still be able to run
+        # the deterministic emergency rule. Withholding here would make a
+        # missing artifact indistinguishable from a healthy plant.
+        decision = IrrigationDecider(
+            None, limits=EnvelopeLimits.autonomous(), require_model=False
+        ).decide(features(soil_moisture_pct=11.0))
+
+        self.assertTrue(decision.irrigate)
+        self.assertEqual(decision.verdict, Verdict.IRRIGATE)
+        self.assertIsNone(decision.vote)
+
+    def test_without_require_model_the_envelope_still_vetoes(self) -> None:
+        # Dropping the model requirement drops exactly one gate. Soil that is
+        # not dry is still soil that is not dry.
+        decision = IrrigationDecider(
+            None, limits=EnvelopeLimits.autonomous(), require_model=False
+        ).decide(features(soil_moisture_pct=30.0))
+
+        self.assertFalse(decision.irrigate)
+        self.assertEqual(decision.verdict, Verdict.SOIL_NOT_DRY)
+
+    def test_a_present_model_can_still_suppress_without_require_model(self) -> None:
+        # require_model relaxes "no model means no water", never "the model may
+        # be ignored". The forest keeps its veto.
+        decision = IrrigationDecider(
+            _StubModel(False), limits=EnvelopeLimits.autonomous(), require_model=False
+        ).decide(features(soil_moisture_pct=11.0))
+
+        self.assertFalse(decision.irrigate)
+        self.assertEqual(decision.verdict, Verdict.MODEL_WITHHELD)
         self.assertTrue(decision.envelope_allows)
 
     def test_model_can_withhold_inside_the_envelope(self) -> None:

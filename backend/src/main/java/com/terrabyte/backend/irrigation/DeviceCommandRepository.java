@@ -1,6 +1,8 @@
 package com.terrabyte.backend.irrigation;
 
 import java.sql.PreparedStatement;
+
+import org.springframework.dao.DuplicateKeyException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -34,24 +36,59 @@ public class DeviceCommandRepository {
                         actual_ml, actual_runtime_ms, stop_cause, origin)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """);
-            statement.setString(1, command.commandId());
-            statement.setLong(2, command.potId());
-            statement.setString(3, command.correlationId());
-            statement.setString(4, command.actuator());
-            statement.setString(5, command.action());
-            setNullableInt(statement, 6, command.grantedMl());
-            statement.setInt(7, command.maxRuntimeMs());
-            statement.setString(8, command.state().name());
-            statement.setTimestamp(9, Timestamp.from(command.issuedAt()));
-            statement.setTimestamp(10, Timestamp.from(command.expiresAt()));
-            setNullableTimestamp(statement, 11, command.ackedAt());
-            setNullableTimestamp(statement, 12, command.completedAt());
-            setNullableInt(statement, 13, command.actualMl());
-            setNullableInt(statement, 14, command.actualRuntimeMs());
-            statement.setString(15, command.stopCause());
-            statement.setString(16, command.origin().name());
+            bind(statement, command);
             return statement;
         });
+    }
+
+    /** The column order both inserts above share, in one place so they cannot drift. */
+    private static void bind(PreparedStatement statement, DeviceCommand command)
+            throws java.sql.SQLException {
+        statement.setString(1, command.commandId());
+        statement.setLong(2, command.potId());
+        statement.setString(3, command.correlationId());
+        statement.setString(4, command.actuator());
+        statement.setString(5, command.action());
+        setNullableInt(statement, 6, command.grantedMl());
+        statement.setInt(7, command.maxRuntimeMs());
+        statement.setString(8, command.state().name());
+        statement.setTimestamp(9, Timestamp.from(command.issuedAt()));
+        statement.setTimestamp(10, Timestamp.from(command.expiresAt()));
+        setNullableTimestamp(statement, 11, command.ackedAt());
+        setNullableTimestamp(statement, 12, command.completedAt());
+        setNullableInt(statement, 13, command.actualMl());
+        setNullableInt(statement, 14, command.actualRuntimeMs());
+        statement.setString(15, command.stopCause());
+        statement.setString(16, command.origin().name());
+    }
+
+    /**
+     * Inserts a command that may already be here, and says which it was.
+     *
+     * <p>For rows this server did not originate: irrigation a gateway performed
+     * on its own arrives over QoS 1 from a queue that retries until the publish
+     * is acknowledged, so the same delivery reaching us twice is ordinary
+     * traffic rather than an error. {@link #save} is the right shape for a
+     * command <em>we</em> minted, where a duplicate id would be a bug worth
+     * throwing over.
+     *
+     * <p>The conflict target is the primary key, so the second insert is a
+     * no-op rather than an update: the first arrival is the authoritative one
+     * and a later copy carries nothing new.
+     *
+     * @return true when this call is what created the row
+     */
+    public boolean saveIfAbsent(DeviceCommand command) {
+        try {
+            save(command);
+            return true;
+        } catch (DuplicateKeyException alreadyHere) {
+            // Caught rather than avoided with ON CONFLICT: that syntax is
+            // PostgreSQL's, and H2 in PostgreSQL compatibility mode — which is
+            // what the tests run against — rejects it outright. Letting the
+            // primary key do the work is portable and needs no dialect branch.
+            return false;
+        }
     }
 
     public Optional<DeviceCommand> findById(String commandId) {

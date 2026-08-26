@@ -136,9 +136,10 @@ public class MqttConfig {
             MqttProperties properties,
             ObjectMapper objectMapper,
             CommandTargetResolver targetResolver,
+            GatewayLinkStateRegistry linkStates,
             Clock clock) {
         return new MqttCommandDispatcher(
-                mqttClient, properties, objectMapper, targetResolver,
+                mqttClient, properties, objectMapper, targetResolver, linkStates,
                 properties.publishTimeout(), clock);
     }
 }

@@ -47,11 +47,13 @@ import queue
 import sqlite3
 import threading
 import time
+import uuid
 from typing import Any, Callable, Iterable, Sequence
 
-from .outbox import KIND_ACK, OutboxFullError
+from .outbox import KIND_ACK, KIND_CONTROL, OutboxFullError
 from .protocol import (
     CommandAck,
+    EdgeIrrigationRecord,
     ProtocolError,
     epoch_to_iso8601,
     parse_iso8601_utc,
@@ -70,6 +72,16 @@ LOGGER = logging.getLogger(__name__)
 # size the deadman window, never to clamp an outgoing command — see
 # serial_command_frame for why clamping here would destroy evidence.
 PUMP_ABS_MAX_MS = 210_000
+
+# Marks a command this gateway minted for itself. The prefix is how the ack
+# path tells "the server asked for this" from "we did", and it has to be
+# something the backend would never generate: its ids are ULIDs.
+LOCAL_COMMAND_PREFIX = "edge-"
+
+# A local dose gets a short deadline for the same reason a cloud command
+# does. The decision behind it was made against a reading that is already
+# subject to a ten-minute freshness gate.
+LOCAL_DOSE_TTL_SECONDS = 120.0
 
 # The deadman frame. Content-free on purpose: G3 counts *bytes received*, not
 # messages understood, and the firmware answers it with nothing.
@@ -169,6 +181,11 @@ STOP_PI_BAD_PARAMS = "pi_bad_params"
 STOP_PI_UNKNOWN_NODE = "pi_unknown_node"
 STOP_PI_AMBIGUOUS_NODE = "pi_ambiguous_node"
 STOP_PI_LINK_DOWN = "pi_link_down"
+# Not a fault of the command or of the hardware. This gateway is holding
+# irrigation records the server has not seen (RESYNC), or nothing may run at
+# all (SAFE_HOLD) — see cloud_link. Distinct from pi_link_down, which is a
+# dead serial cable.
+STOP_PI_LINK_HELD = "pi_link_held"
 STOP_PI_FRAME_TOO_LONG = "pi_frame_too_long"
 
 
@@ -519,6 +536,22 @@ class CommandJournal:
 
 
 @dataclass
+class _LocalDose:
+    """A dose this gateway decided on, waiting for the firmware to answer.
+
+    Local doses travel the ordinary command path — same framing, same interlock,
+    same dead-man — and differ only in where their outcome goes. The backend
+    never issued the id, so an ack for it would be dropped as an ack for an
+    unknown command; the delivery is reported through the control queue instead.
+    """
+
+    node_id: str
+    requested_ml: float
+    settled: threading.Event
+    delivered_ml: float = 0.0
+
+
+@dataclass
 class _InFlight:
     """A command believed to be running on the Arduino right now."""
 
@@ -604,6 +637,14 @@ class CommandRelay:
         self.relayed = 0
         self.rejected = 0
         self.dropped = 0
+        # None means "no state machine wired", which is how the relay behaves
+        # on its own: every content-valid command runs. set_link_gate installs
+        # the real answer once the service has a CloudLink.
+        self._link_gate: Callable[[], bool] | None = None
+        # Doses this gateway originated, by command id. Bounded by the one
+        # in-flight dose the firmware interlock allows, plus whatever has not
+        # been collected yet, so it is pruned when a caller awaits it.
+        self._local_doses: dict[str, _LocalDose] = {}
 
     # -- wiring ----------------------------------------------------------
 
@@ -620,6 +661,91 @@ class CommandRelay:
             ("command-deadman", self.run_deadman),
             ("light-keepalive", self.run_light_keepalive),
         ]
+
+    def begin_local_dose(
+        self, node_id: str, volume_ml: float, *, max_runtime_ms: int
+    ) -> str | None:
+        """Start a dose this gateway decided on. Returns its id, or None.
+
+        None means the command never reached the wire — an unresolvable node, a
+        frame the firmware could not hold, a refused parameter. The caller has
+        delivered nothing and must record nothing.
+
+        Deliberately does not consult the link gate: that gate exists to refuse
+        *cloud* commands whose budget is stale, and this dose is the one thing
+        that is supposed to happen while the cloud is unreachable. What keeps it
+        safe is the envelope in :mod:`terrabyte_edge.autonomy`, which is far
+        narrower than anything the cloud would authorise.
+        """
+
+        command_id = f"{LOCAL_COMMAND_PREFIX}{uuid.uuid4().hex[:20]}"
+        dose = _LocalDose(
+            node_id=node_id,
+            requested_ml=float(volume_ml),
+            settled=threading.Event(),
+        )
+        with self._lock:
+            self._local_doses[command_id] = dose
+
+        payload = json.dumps(
+            {
+                "schema_version": 2,
+                "message_type": "command",
+                "command_id": command_id,
+                "gateway_id": self._gateway_id,
+                "node_id": node_id,
+                "actuator": "pump",
+                "action": "dose",
+                "params": {
+                    "volume_ml": int(round(volume_ml)),
+                    "max_runtime_ms": int(max_runtime_ms),
+                },
+                "issued_at": epoch_to_iso8601(self._clock()),
+                # A TTL of its own, for the same reason a cloud command has one:
+                # a dose that cannot start promptly must not start later.
+                "expires_at": epoch_to_iso8601(
+                    self._clock() + LOCAL_DOSE_TTL_SECONDS
+                ),
+                "origin": "EDGE_FALLBACK",
+            }
+        ).encode()
+
+        relayed_before = self.relayed
+        self._process(payload)
+        if self.relayed == relayed_before:
+            with self._lock:
+                self._local_doses.pop(command_id, None)
+            return None
+        return command_id
+
+    def await_local_dose(self, command_id: str, *, timeout: float) -> float:
+        """Millilitres the firmware reported for a local dose. 0.0 if none.
+
+        Zero covers every way this can go wrong — refused, aborted before the
+        pump ran, or simply never answered — and they are the same answer to the
+        only question the caller has: is there a delivery to record.
+        """
+
+        with self._lock:
+            dose = self._local_doses.get(command_id)
+        if dose is None:
+            return 0.0
+        dose.settled.wait(timeout)
+        with self._lock:
+            # Collected once. A dose left in the map after its answer was taken
+            # would accumulate for as long as the process runs.
+            self._local_doses.pop(command_id, None)
+        return dose.delivered_ml
+
+    def set_link_gate(self, gate: Callable[[], bool]) -> None:
+        """Register the predicate that says whether cloud commands may run.
+
+        Injected rather than imported so the relay keeps knowing nothing about
+        the state machine: it asks one boolean question and the answer arrives
+        from :class:`terrabyte_edge.cloud_link.CloudLink`.
+        """
+
+        self._link_gate = gate
 
     def offer(self, payload: bytes, retained: bool = False) -> None:
         """Accept one raw command. **Runs on paho's network thread.**
@@ -730,6 +856,21 @@ class CommandRelay:
                 request.message_type,
             )
             self._reject(request, REASON_NODE_OFFLINE, STOP_PI_BAD_SCHEMA)
+            return
+
+        # --- the link gate ---
+        #
+        # A property of us, not of the command, so it is asked as soon as the
+        # envelope is known to be readable. Rejected rather than dropped: the
+        # backend holds a command in ISSUED and charges its granted volume to
+        # the daily budget until something terminal arrives, so staying quiet
+        # here costs the pot water it never received.
+        if self._link_gate is not None and not self._link_gate():
+            LOGGER.warning(
+                "refusing command, link is holding command_id=%s",
+                request.command_id,
+            )
+            self._reject(request, REASON_NODE_OFFLINE, STOP_PI_LINK_HELD)
             return
 
         # --- TTL, the whole reason this layer exists (D19) ---
@@ -1257,6 +1398,9 @@ class CommandRelay:
         )
 
     def _enqueue_ack(self, ack: CommandAck, *, actuator: str | None = None) -> None:
+        if ack.command_id.startswith(LOCAL_COMMAND_PREFIX):
+            self._settle_local_dose(ack)
+            return
         try:
             enqueued = self._outbox.enqueue(ack, kind=KIND_ACK)
         except OutboxFullError as exc:
@@ -1280,6 +1424,59 @@ class CommandRelay:
                 "ack already queued, not duplicating command_id=%s phase=%s",
                 ack.command_id,
                 ack.phase,
+            )
+
+    def _settle_local_dose(self, ack: CommandAck) -> None:
+        """Turn a firmware answer for a local dose into a record for the server.
+
+        Sent as an EdgeIrrigationRecord on the control queue rather than as an
+        ack, because there is no command on the server to acknowledge. That
+        queue is also what holds the gateway in RESYNC until the server has
+        heard about every drop delivered without its knowledge.
+        """
+
+        with self._lock:
+            dose = self._local_doses.get(ack.command_id)
+        if dose is None:
+            LOGGER.warning(
+                "firmware answered a local dose nobody is waiting for command_id=%s",
+                ack.command_id,
+            )
+            return
+        if ack.phase not in ("completed", "aborted", "rejected"):
+            # accepted: the pump is running. Nothing to report and nobody to
+            # release until it stops.
+            return
+
+        delivered = float(ack.estimated_ml or 0.0)
+        dose.delivered_ml = delivered
+        dose.settled.set()
+        if delivered <= 0.0:
+            LOGGER.warning(
+                "local dose delivered nothing command_id=%s phase=%s stop_cause=%s",
+                ack.command_id, ack.phase, ack.stop_cause,
+            )
+            return
+
+        record = EdgeIrrigationRecord(
+            record_id=ack.command_id,
+            node_id=dose.node_id,
+            volume_ml=delivered,
+            dispensed_at_utc=ack.at_utc,
+        )
+        try:
+            self._outbox.enqueue(record, kind=KIND_CONTROL)
+        except OutboxFullError as exc:
+            # Louder than a dropped ack. The server counts what it receives
+            # against the pot's daily budget, so a control row that never
+            # queues is water the cloud will authorise a second time.
+            LOGGER.critical(
+                "edge irrigation record dropped, durable outbox is full "
+                "command_id=%s node_id=%s ml=%.1f reason=%s",
+                ack.command_id, dose.node_id, delivered, exc,
+            )
+            self._state.add_event(
+                "error", "저장 큐가 가득 차 자율 관수 기록을 버렸습니다"
             )
 
     def in_flight_ids(self) -> Iterable[str]:

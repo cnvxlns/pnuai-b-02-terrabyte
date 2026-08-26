@@ -239,6 +239,20 @@ class Settings:
     command_deadman_grace_seconds: float = 5.0
     command_max_serial_bytes: int = 120
     command_journal_retention_seconds: float = 86_400.0
+    # How long the backend may stay silent before this gateway acts on its own.
+    # The three windows are asymmetric on purpose — see terrabyte_edge.cloud_link
+    # — and the degrade window must stay well above the backend's own heartbeat
+    # cadence, or ordinary jitter reads as an outage.
+    cloud_degrade_after_seconds: float = 90.0
+    cloud_autonomy_after_seconds: float = 900.0
+    cloud_recover_after_seconds: float = 60.0
+    # How often the emergency rule is even considered. Far shorter than the
+    # twelve-hour interval it enforces: the tick is cheap and the point is to
+    # notice a dry pot promptly once autonomy is already in force.
+    autonomy_interval_seconds: float = 30.0
+    # No flow meter exists, so a dose is delivered as pump seconds. Matches the
+    # backend's bench-measured rate; a differently plumbed board overrides it.
+    pump_flow_ml_per_s: float = 0.98
 
     def substrate_volume_ml_for(self, node_id: str) -> int | None:
         return self.pot_substrate_ml.get(node_id)
@@ -428,5 +442,20 @@ class Settings:
                 "TB_COMMAND_JOURNAL_RETENTION_SECONDS",
                 86_400.0,
                 minimum=60.0,
+            ),
+            cloud_degrade_after_seconds=_number(
+                values, "TB_CLOUD_DEGRADE_AFTER_SECONDS", 90.0, minimum=1.0
+            ),
+            cloud_autonomy_after_seconds=_number(
+                values, "TB_CLOUD_AUTONOMY_AFTER_SECONDS", 900.0, minimum=1.0
+            ),
+            cloud_recover_after_seconds=_number(
+                values, "TB_CLOUD_RECOVER_AFTER_SECONDS", 60.0, minimum=0.0
+            ),
+            autonomy_interval_seconds=_number(
+                values, "TB_AUTONOMY_INTERVAL_SECONDS", 30.0, minimum=1.0
+            ),
+            pump_flow_ml_per_s=_number(
+                values, "TB_PUMP_FLOW_ML_PER_S", 0.98, minimum=0.01
             ),
         )

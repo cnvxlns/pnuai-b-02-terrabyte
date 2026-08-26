@@ -16,10 +16,23 @@ Orange Pi 게이트웨이 ↔ Spring 백엔드 통신을 HTTP 대신 MQTT로 처
 
 ```
 tb/v2/{gatewayId}/up/telemetry     게이트웨이 → 서버   QoS 1
-tb/v2/{gatewayId}/up/status        온라인 상태 (LWT 등록, retain)
+tb/v2/{gatewayId}/up/status        온라인 상태 + 링크 상태 (LWT 등록, retain)
 tb/v2/{gatewayId}/up/ack           명령 응답            QoS 1
+tb/v2/{gatewayId}/up/irrigation    클라우드 장애 중 자율 관수 기록  QoS 1
 tb/v2/{gatewayId}/dn/command       서버 → 게이트웨이     QoS 1
-tb/v2/{gatewayId}/dn/heartbeat     서버 → 게이트웨이 생존 확인
+tb/v2/{gatewayId}/dn/heartbeat     서버 → 게이트웨이 생존 확인      QoS 0
+```
+
+`up/status` 의 `state` 필드는 게이트웨이의 링크 상태(`CLOUD_ONLINE`, `RESYNC` 등)이며,
+서버는 `RESYNC`/`SAFE_HOLD` 인 게이트웨이에 명령을 발행하지 않는다. 아직 서버가 받지 못한
+자율 관수 기록이 남아 있는 동안 명령을 보내면, 이미 흙에 들어간 물을 모르는 예산으로 승인한
+명령이 실행된다.
+
+`up/irrigation` 은 ack 이 아니다. 서버가 발행한 명령이 없으므로 대응할 command_id 도 없고,
+`device_command(origin=EDGE_FALLBACK, state=COMPLETED)` 로 기록되어 일일 예산 질의에 그대로
+합산된다.
+
+```
 ```
 
 ## 개발용 자격 증명 (dev-only, 비밀 아님)
