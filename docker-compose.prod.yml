@@ -112,6 +112,15 @@ services:
       # 게이트 2(연속 관수 제한). 기본값은 코드와 같은 6시간이다. 시연에서
       # 반복 촬영이 필요할 때만 잠시 줄인다.
       APP_IRRIGATION_MIN_INTERVAL: ${IRRIGATION_MIN_INTERVAL:-PT6H}
+      # 룰 엔진. 임계값을 밖에서 조절할 수 없으면 시연 중에 관수를 유도하려고
+      # 이미지를 다시 빌드해야 한다. 기본값은 모두 코드와 같다.
+      RULE_INTERVAL_MS: ${RULE_INTERVAL_MS:-60000}
+      # 이 값 아래로 내려가면 Governor 에게 물을 요청한다. 요청일 뿐이며
+      # 간격·예산·용량은 여전히 Governor 가 판단한다.
+      RULE_SOIL_DRY_GATE_PCT: ${RULE_SOIL_DRY_GATE_PCT:-35.0}
+      # 조명이 켜질 수 있는 시간대. 밖에서는 램프가 무조건 꺼진다.
+      RULE_PHOTOPERIOD_START: ${RULE_PHOTOPERIOD_START:-06:00}
+      RULE_PHOTOPERIOD_END: ${RULE_PHOTOPERIOD_END:-22:00}
       JWT_ISSUER: ${JWT_ISSUER:-terrabyte-backend}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 을 32바이트 이상으로 설정하세요}
       JWT_ACCESS_TOKEN_TTL: ${JWT_ACCESS_TOKEN_TTL:-PT1H}
