@@ -28,7 +28,7 @@ export const Dashboard: Story = {
     onCreatePot: async () => undefined,
     onSelectPot: () => undefined,
     onUpdatePot: async () => undefined,
-    pots: [{ id: 1, deviceId: 1, label: '화분 1', cropCode: 'cherry_tomato', status: 'ONLINE' }],
+    pots: [{ id: 1, deviceId: 1, label: '화분 1', cropCode: 'cherry_tomato', status: 'ONLINE', autoControlEnabled: true }],
     selectedPotId: 1,
   },
 };
@@ -40,7 +40,7 @@ export const Shop: Story = {
     onCreatePot: async () => undefined,
     onSelectPot: () => undefined,
     onUpdatePot: async () => undefined,
-    pots: [{ id: 1, deviceId: 1, label: '화분 1', cropCode: 'cherry_tomato', status: 'ONLINE' }],
+    pots: [{ id: 1, deviceId: 1, label: '화분 1', cropCode: 'cherry_tomato', status: 'ONLINE', autoControlEnabled: true }],
     selectedPotId: 1,
   },
 };

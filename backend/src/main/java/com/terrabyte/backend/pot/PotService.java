@@ -38,6 +38,25 @@ public class PotService {
                         HttpStatus.NOT_FOUND, "POT_NOT_FOUND", "화분을 찾을 수 없습니다.")));
     }
 
+    /**
+     * Hands this pot to the rule engine, or takes it back.
+     *
+     * <p>Off means "I will decide when to water", not "nothing may run": manual
+     * irrigation and light commands ignore this entirely. Only the periodic
+     * evaluation in {@code RuleEngine} reads it.
+     */
+    @Transactional
+    public PotResponse setAutoControl(long userId, long potId, boolean enabled) {
+        Pot pot = potRepository.findOwned(potId, userId)
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.NOT_FOUND, "POT_NOT_FOUND", "화분을 찾을 수 없습니다."));
+        potRepository.setAutoControl(pot.id(), enabled);
+        return potRepository.findById(pot.id())
+                .map(PotResponse::from)
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.NOT_FOUND, "POT_NOT_FOUND", "화분을 찾을 수 없습니다."));
+    }
+
     @Transactional
     public PotResponse update(long userId, long potId, UpdatePotRequest request) {
         Pot pot = potRepository.findOwned(potId, userId)
