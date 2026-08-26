@@ -1,13 +1,20 @@
 package com.terrabyte.backend.irrigation;
 
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Optional;
 
+import com.terrabyte.backend.device.Device;
+import com.terrabyte.backend.device.DeviceRepository;
 import com.terrabyte.backend.irrigation.CommandTargetResolver.CommandTarget;
+import com.terrabyte.backend.notification.IrrigationCompletedEvent;
+import com.terrabyte.backend.pot.Pot;
+import com.terrabyte.backend.pot.PotRepository;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -36,14 +43,23 @@ public class CommandAckService {
 
     private final DeviceCommandRepository commandRepository;
     private final CommandTargetResolver targetResolver;
+    private final PotRepository potRepository;
+    private final DeviceRepository deviceRepository;
+    private final ApplicationEventPublisher eventPublisher;
     private final Clock clock;
 
     public CommandAckService(
             DeviceCommandRepository commandRepository,
             CommandTargetResolver targetResolver,
+            PotRepository potRepository,
+            DeviceRepository deviceRepository,
+            ApplicationEventPublisher eventPublisher,
             Clock clock) {
         this.commandRepository = commandRepository;
         this.targetResolver = targetResolver;
+        this.potRepository = potRepository;
+        this.deviceRepository = deviceRepository;
+        this.eventPublisher = eventPublisher;
         this.clock = clock;
     }
 
@@ -121,7 +137,53 @@ public class CommandAckService {
                 command.state(), recordedState, command.commandId(), command.potId(), gatewayId,
                 phase.wireValue(), ack.reason(), stopCause, ack.actualMl(), ack.actualRuntimeMs(),
                 at);
+        announceIfIrrigationCompleted(command, recordedState, ack, at);
         return AckResult.APPLIED;
+    }
+
+    /**
+     * Tells the owner that water actually moved.
+     *
+     * <p>Deliberately downstream of the {@code rows == 0} return above, so the
+     * guarded UPDATE is the only thing deciding whether this fires. A QoS 1
+     * redelivery changes no rows, returns IGNORED, and never reaches here — which
+     * is why the notification needs no suppression window of its own.
+     *
+     * <p>Restricted to the pump. A light latch is recorded COMPLETED on its
+     * <em>accepted</em> ack (see {@link #applyTransition}), and "관수가
+     * 완료되었습니다" for a light would be a lie about which actuator ran.
+     *
+     * <p>An unclaimed gateway simply has no one to address; the command is still
+     * recorded and still counts against the budget.
+     */
+    private void announceIfIrrigationCompleted(
+            DeviceCommand command, CommandState recordedState, CommandAck ack, Instant at) {
+
+        if (recordedState != CommandState.COMPLETED
+                || !DeviceCommand.ACTUATOR_PUMP.equals(command.actuator())) {
+            return;
+        }
+        Optional<Pot> pot = potRepository.findById(command.potId());
+        if (pot.isEmpty()) {
+            return;
+        }
+        Long userId = deviceRepository.findById(pot.get().deviceId())
+                .map(Device::userId)
+                .orElse(null);
+        if (userId == null) {
+            LOGGER.debug(
+                    "no owner to announce irrigation to command_id={} pot_id={}",
+                    command.commandId(), command.potId());
+            return;
+        }
+        eventPublisher.publishEvent(new IrrigationCompletedEvent(
+                userId,
+                pot.get().deviceId(),
+                command.potId(),
+                pot.get().label(),
+                command.commandId(),
+                ack.actualMl() == null ? null : BigDecimal.valueOf(ack.actualMl()),
+                at));
     }
 
     private int applyTransition(

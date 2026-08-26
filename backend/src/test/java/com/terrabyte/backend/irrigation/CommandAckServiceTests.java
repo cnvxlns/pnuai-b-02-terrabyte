@@ -2,11 +2,15 @@ package com.terrabyte.backend.irrigation;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 
 import com.terrabyte.backend.irrigation.CommandAckService.AckResult;
 import com.terrabyte.backend.measurement.MeasurementStore;
+import com.terrabyte.backend.notification.IrrigationCompletedEvent;
+import com.terrabyte.backend.notification.PushSender;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,20 +21,25 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.event.ApplicationEvents;
+import org.springframework.test.context.event.RecordApplicationEvents;
 
 /**
  * The command state machine, from a device report to the budget it changes.
  */
 @SpringBootTest
 @ActiveProfiles("test")
+@RecordApplicationEvents
 class CommandAckServiceTests {
 
     private static final long POT_ID = 1L;
     private static final String NODE_ID = "terrabyte-node-01";
+    private static final String OWNER_EMAIL = "ack-owner@example.com";
 
     @Autowired private CommandAckService ackService;
     @Autowired private DeviceCommandRepository commands;
     @Autowired private CommandIdGenerator commandIdGenerator;
+    @Autowired private ApplicationEvents events;
 
     @Autowired
     @Qualifier("postgresJdbcTemplate")
@@ -38,12 +47,19 @@ class CommandAckServiceTests {
 
     @MockitoBean private MeasurementStore measurementStore;
 
+    /** Kept off the wire: an announcement here must not try to reach Firebase. */
+    @MockitoBean private PushSender pushSender;
+
     private String gatewayId;
 
     @BeforeEach
     void setUp() {
         jdbcTemplate.update("DELETE FROM device_command");
         jdbcTemplate.update("UPDATE pot SET node_id = ? WHERE id = ?", NODE_ID, POT_ID);
+        // Ownership is per-test, because whether anyone is listening is exactly
+        // what two of these tests are about. Another class may have left an owner
+        // on this device.
+        clearOwner();
         gatewayId = jdbcTemplate.queryForObject(
                 "SELECT d.hardware_id FROM device d JOIN pot p ON p.device_id = d.id"
                         + " WHERE p.id = ?",
@@ -54,6 +70,28 @@ class CommandAckServiceTests {
     void tearDown() {
         jdbcTemplate.update("DELETE FROM device_command");
         jdbcTemplate.update("UPDATE pot SET node_id = NULL WHERE id = ?", POT_ID);
+        clearOwner();
+    }
+
+    private void clearOwner() {
+        jdbcTemplate.update(
+                "UPDATE device SET user_id = NULL"
+                        + " WHERE id = (SELECT device_id FROM pot WHERE id = ?)",
+                POT_ID);
+        jdbcTemplate.update(
+                "DELETE FROM notification_delivery WHERE notification_id IN ("
+                        + "SELECT id FROM notification_event WHERE user_id IN ("
+                        + "SELECT id FROM app_user WHERE email = ?))",
+                OWNER_EMAIL);
+        jdbcTemplate.update(
+                "DELETE FROM notification_event WHERE user_id IN ("
+                        + "SELECT id FROM app_user WHERE email = ?)",
+                OWNER_EMAIL);
+        jdbcTemplate.update(
+                "DELETE FROM notification_condition_state WHERE user_id IN ("
+                        + "SELECT id FROM app_user WHERE email = ?)",
+                OWNER_EMAIL);
+        jdbcTemplate.update("DELETE FROM app_user WHERE email = ?", OWNER_EMAIL);
     }
 
     // -- the happy path ----------------------------------------------------
@@ -318,7 +356,70 @@ class CommandAckServiceTests {
                 .isEqualTo(issued.issuedAt());
     }
 
+    // -- the announcement a completion earns -------------------------------
+
+    @Test
+    void aCompletedPumpAckAnnouncesTheIrrigationOnce() {
+        long userId = claimOwner();
+        String commandId = issue(100);
+
+        ackService.apply(gatewayId, ack(commandId, "completed", 96, 12_000, "volume_reached"));
+        // QoS 1 promises duplicates on both hops. The announcement rides on the
+        // guarded UPDATE rather than on a suppression window of its own: no rows
+        // changed means nothing happened means nobody is told.
+        ackService.apply(gatewayId, ack(commandId, "completed", 96, 12_000, "volume_reached"));
+
+        List<IrrigationCompletedEvent> announced =
+                events.stream(IrrigationCompletedEvent.class).toList();
+        assertThat(announced).hasSize(1);
+        assertThat(announced.getFirst().userId()).isEqualTo(userId);
+        assertThat(announced.getFirst().potId()).isEqualTo(POT_ID);
+        assertThat(announced.getFirst().commandId()).isEqualTo(commandId);
+        assertThat(announced.getFirst().actualMilliliters())
+                .isEqualByComparingTo(BigDecimal.valueOf(96));
+    }
+
+    @Test
+    void aCompletedLightAckAnnouncesNoIrrigation() {
+        claimOwner();
+        String commandId = issueLight(true);
+
+        // The one path where COMPLETED is not water: a light latch completes on
+        // its accepted ack. Announcing "관수가 완료되었습니다" here would be a lie.
+        assertThat(ackService.apply(gatewayId, ack(commandId, "accepted", null, null, null)))
+                .isEqualTo(AckResult.APPLIED);
+
+        assertThat(events.stream(IrrigationCompletedEvent.class)).isEmpty();
+    }
+
+    @Test
+    void anUnclaimedDeviceHasNobodyToAnnounceTo() {
+        String commandId = issue(100);
+
+        assertThat(ackService.apply(
+                        gatewayId, ack(commandId, "completed", 96, 12_000, "volume_reached")))
+                .isEqualTo(AckResult.APPLIED);
+
+        // The water still counts against the budget; there is simply no owner to
+        // address the notification to.
+        assertThat(consumed()).isEqualTo(96);
+        assertThat(events.stream(IrrigationCompletedEvent.class)).isEmpty();
+    }
+
     // -- fixtures ----------------------------------------------------------
+
+    /** Gives this pot's gateway an owner, which is who an announcement is for. */
+    private long claimOwner() {
+        jdbcTemplate.update(
+                "INSERT INTO app_user (email, password_hash, nickname) VALUES (?, ?, ?)",
+                OWNER_EMAIL, "unused", "관수알림테스터");
+        long userId = jdbcTemplate.queryForObject(
+                "SELECT id FROM app_user WHERE email = ?", Long.class, OWNER_EMAIL);
+        jdbcTemplate.update(
+                "UPDATE device SET user_id = ? WHERE id = (SELECT device_id FROM pot WHERE id = ?)",
+                userId, POT_ID);
+        return userId;
+    }
 
     private String issue(int grantedMl) {
         Instant issuedAt = Instant.now();

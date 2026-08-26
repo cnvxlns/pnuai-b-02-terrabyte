@@ -7,6 +7,11 @@
 frontend/
 └─ app/                         # Expo React Native 앱 루트
   ├─ App.tsx                    # 앱 전체 흐름을 묶는 최상위 컴포넌트
+  ├─ index.ts                   # 앱 진입점
+  ├─ app.config.ts              # Firebase 설정을 연결하는 동적 Expo 설정
+  ├─ app.json                   # Expo 기본 설정
+  ├─ eas.json                   # EAS Android APK 빌드 프로필
+  ├─ assets/                    # 앱 아이콘·이미지 등 정적 에셋
   ├─ src/                       # 실제 화면과 기능 코드
     ├─ appTheme/                # 색상, 글꼴, 스타일 토큰
     ├─ analysis/                # 작물 대체 추천 API
@@ -25,6 +30,7 @@ frontend/
     ├─ payment/                 # 토스 결제 처리
     ├─ pot/                     # 화분 조회 API
     ├─ screens/                 # 실제 서비스 화면
+    ├─ sensor/                  # 기기별 센서 상태 API
     ├─ shared/                  # 공용 훅/가공 로직
     ├─ shop/                    # 상품 목록 API
     ├─ space/                   # 재배 공간 API
@@ -132,7 +138,8 @@ adb install path\to\terrabyte.apk
 1. 백엔드에 Firebase 서비스 계정을 주입하고 `FIREBASE_ENABLED=true`로 실행합니다.
 2. 설치한 앱에서 로그인하고 Android 알림 권한을 허용합니다.
 3. 백엔드의 `push_registration`에 해당 사용자의 Android 토큰이 활성 상태로 저장됐는지 확인합니다.
-4. 센서 quality 오류 또는 MQTT gateway offline 이벤트를 발생시킵니다.
+4. 알림 하나를 발생시킵니다. 세 종류 모두 확인하려면 센서 quality 오류, MQTT gateway offline,
+   그리고 관수를 실행해 게이트웨이가 `completed` ack를 올려보내게 합니다.
 5. 앱의 포그라운드, 백그라운드, 종료 상태에서 알림 수신을 각각 확인합니다.
 6. 알림을 눌렀을 때 관련 기기와 화분이 선택되고, 헤더 알림함의 읽지 않은 개수가 일치하는지 확인합니다.
 7. 로그아웃 후 같은 기기로 푸시가 더 이상 전송되지 않는지 확인합니다.

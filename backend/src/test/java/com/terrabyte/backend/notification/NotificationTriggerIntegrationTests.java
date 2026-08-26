@@ -1,6 +1,6 @@
 package com.terrabyte.backend.notification;
 
-import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -13,6 +13,13 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.terrabyte.backend.irrigation.CommandAck;
+import com.terrabyte.backend.irrigation.CommandAckService;
+import com.terrabyte.backend.irrigation.CommandIdGenerator;
+import com.terrabyte.backend.irrigation.CommandOrigin;
+import com.terrabyte.backend.irrigation.CommandState;
+import com.terrabyte.backend.irrigation.DeviceCommand;
+import com.terrabyte.backend.irrigation.DeviceCommandRepository;
 import com.terrabyte.backend.measurement.MeasurementStore;
 import com.terrabyte.backend.measurement.MeasurementService;
 import com.terrabyte.backend.measurement.TelemetryEnvelope;
@@ -21,7 +28,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -42,7 +48,13 @@ class NotificationTriggerIntegrationTests {
     private NotificationDeliveryWorker deliveryWorker;
 
     @Autowired
-    private ApplicationEventPublisher eventPublisher;
+    private CommandAckService ackService;
+
+    @Autowired
+    private DeviceCommandRepository commands;
+
+    @Autowired
+    private CommandIdGenerator commandIdGenerator;
 
     @Autowired
     @Qualifier("postgresJdbcTemplate")
@@ -63,6 +75,7 @@ class NotificationTriggerIntegrationTests {
         jdbcTemplate.update("DELETE FROM notification_condition_state");
         jdbcTemplate.update("DELETE FROM push_registration");
         jdbcTemplate.update("DELETE FROM telemetry_event");
+        jdbcTemplate.update("DELETE FROM device_command");
         jdbcTemplate.update("DELETE FROM app_user WHERE email = ?", "trigger-owner@example.com");
         jdbcTemplate.update(
                 "INSERT INTO app_user (email, password_hash, nickname) VALUES (?, ?, ?)",
@@ -117,29 +130,49 @@ class NotificationTriggerIntegrationTests {
         assertThat(countEvents(NotificationType.SENSOR_ANOMALY)).isEqualTo(2);
     }
 
+    /**
+     * The whole chain, from what the gateway reported to what the phone shows.
+     *
+     * <p>Driven through {@link CommandAckService} rather than by publishing the
+     * event by hand: the event contract and its listener were both in place long
+     * before anything published one, so a test that publishes it itself passes
+     * whether or not the ack path is wired at all.
+     */
     @Test
-    void irrigationCompletionContractCreatesOneAlertPerCommand() {
+    void aCompletedIrrigationAckReachesThePhoneOncePerCommand() {
         long deviceId = jdbcTemplate.queryForObject(
                 "SELECT id FROM device WHERE hardware_id = ?", Long.class, HARDWARE_ID);
         long potId = jdbcTemplate.queryForObject(
                 "SELECT id FROM pot WHERE device_id = ? AND node_id = 'pot-alert'",
                 Long.class,
                 deviceId);
-        IrrigationCompletedEvent event = new IrrigationCompletedEvent(
-                userId,
-                deviceId,
-                potId,
-                "테스트 화분",
-                "irrigation-command-1",
-                new BigDecimal("250.0"),
-                Instant.now());
+        String commandId = issuePumpCommand(potId);
 
-        eventPublisher.publishEvent(event);
-        eventPublisher.publishEvent(event);
+        ackService.apply(HARDWARE_ID, completedAck(commandId, potId, 250));
+        // The gateway's redelivery, which must not become a second alert.
+        ackService.apply(HARDWARE_ID, completedAck(commandId, potId, 250));
 
         assertThat(countEvents(NotificationType.IRRIGATION_COMPLETED)).isEqualTo(1);
         assertThat(deliveryWorker.drainOnce()).isEqualTo(1);
         verify(pushSender, times(1)).send(eq("trigger-token"), any(PushMessage.class));
+    }
+
+    private String issuePumpCommand(long potId) {
+        Instant issuedAt = Instant.now();
+        String commandId = commandIdGenerator.next(issuedAt);
+        commands.save(new DeviceCommand(
+                commandId, potId, "evt-" + commandId,
+                DeviceCommand.ACTUATOR_PUMP, DeviceCommand.ACTION_DOSE,
+                250, 20_000, CommandState.ISSUED,
+                issuedAt, issuedAt.plus(Duration.ofMinutes(2)),
+                null, null, null, null, null, CommandOrigin.CLOUD));
+        return commandId;
+    }
+
+    private CommandAck completedAck(String commandId, long potId, int actualMl) {
+        return new CommandAck(
+                commandId, "completed", Instant.now(), "OK", potId, actualMl, 12_000,
+                "volume_reached");
     }
 
     private int countEvents(NotificationType type) {
