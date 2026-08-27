@@ -52,7 +52,7 @@ export function DashboardScreen({
   const [kitSensors, setKitSensors] = useState<DeviceSensorStatus[]>([]);
   const [kitSensorsLoading, setKitSensorsLoading] = useState(false);
   const [kitSensorsError, setKitSensorsError] = useState<string | null>(null);
-  const { score: scoreData, measurements: latestData } = useDeviceEnvironment();
+  const { potId, score: scoreData, measurements: latestData } = useDeviceEnvironment();
   const airTemperatureSeries = useMeasurementSeries('air_temperature_c', chartRange);
   const airHumiditySeries = useMeasurementSeries('air_humidity_pct', chartRange);
   const plantLightSeries = useMeasurementSeries('plant_light_ppfd_umol_m2_s', chartRange);
@@ -68,23 +68,33 @@ export function DashboardScreen({
     let active = true;
     setKitSensorsLoading(true);
     setKitSensorsError(null);
-    void getDeviceSensors(device.id)
-      .then((response) => {
-        if (active) setKitSensors(response.sensors);
-      })
-      .catch((error) => {
+    const loadSensors = async () => {
+      try {
+        const response = await getDeviceSensors(device.id);
+        if (active) {
+          setKitSensors(response.sensors);
+          setKitSensorsError(null);
+        }
+      } catch (error) {
         if (active) setKitSensorsError(error instanceof Error ? error.message : '키트 상태를 불러오지 못했습니다.');
-      })
-      .finally(() => {
+      } finally {
         if (active) setKitSensorsLoading(false);
-      });
+      }
+    };
+    void loadSensors();
+    const interval = setInterval(() => void loadSensors(), 3000);
     return () => {
       active = false;
+      clearInterval(interval);
     };
   }, [device?.id]);
 
   const soilMoisture = latestData?.measurements.soilMoisturePct;
   const soilTemperature = latestData?.measurements.soilTemperatureC;
+  const soilMoistureReceived = Boolean(latestData?.quality.soilSensorValid && soilMoisture != null);
+  const soilTemperatureReceived = Boolean(
+    latestData?.quality.soilSensorValid && soilTemperature != null,
+  );
   const realtimeStatus = (value: number | null | undefined) => (
     value == null ? '데이터 수신 대기 중' : '실시간 측정 중'
   );
@@ -106,13 +116,13 @@ export function DashboardScreen({
     },
     {
       label: '토양 수분',
-      value: latestData ? `${latestData.measurements.soilMoisturePct}%` : '--',
-      detail: realtimeStatus(latestData?.measurements.soilMoisturePct),
+      value: soilMoistureReceived ? `${soilMoisture?.toLocaleString('ko-KR')}%` : '--',
+      detail: realtimeStatus(soilMoistureReceived ? soilMoisture : undefined),
     },
     {
       label: '토양 온도',
-      value: soilTemperature == null ? '--' : `${soilTemperature.toLocaleString('ko-KR', { maximumFractionDigits: 1 })}℃`,
-      detail: realtimeStatus(soilTemperature),
+      value: soilTemperatureReceived ? `${soilTemperature?.toLocaleString('ko-KR', { maximumFractionDigits: 1 })}℃` : '--',
+      detail: realtimeStatus(soilTemperatureReceived ? soilTemperature : undefined),
     },
   ];
   const displayFactors = scoreData?.factors ?? [];
@@ -120,9 +130,51 @@ export function DashboardScreen({
     { key: 'temperature', label: '온도', unit: '℃' },
     { key: 'humidity', label: '습도', unit: '%' },
     { key: 'plantLight', label: '조도', unit: 'PPFD' },
-    { key: 'soilMoisture', label: '토양 수분', unit: '%' },
-    { key: 'soilTemperature', label: '토양 온도', unit: '℃' },
   ].filter(({ key }) => !displayFactors.some((factor) => factor.key === key));
+  const sensorStatus = (metric: string, hasMeasurement: boolean) => {
+    const sensor = kitSensors.find((item) => item.potId === potId && item.metric === metric);
+    if (sensor?.status === 'ONLINE') return { label: '정상 수신', warning: false };
+    if (sensor?.status === 'OFFLINE') return { label: '오프라인', warning: true };
+    if (sensor?.status === 'UNAVAILABLE') return { label: '사용 불가', warning: true };
+    if (sensor?.status === 'UNKNOWN') return { label: '상태 미확인', warning: true };
+    return hasMeasurement ? { label: '정상 수신', warning: false } : { label: '수신 대기', warning: true };
+  };
+  const soilMoistureStatus = sensorStatus('soil_moisture_pct', soilMoistureReceived);
+  const soilTemperatureStatus = sensorStatus('soil_temperature_c', soilTemperatureReceived);
+  const environmentStatusRows = [
+    ...displayFactors.map((factor) => ({
+      key: factor.key,
+      label: factor.label,
+      current: `${factor.current.toLocaleString('ko-KR')}${factor.unit}`,
+      range: `${factor.optimalMin.toLocaleString('ko-KR')}~${factor.optimalMax.toLocaleString('ko-KR')}${factor.unit}`,
+      status: factor.status === 'OK' ? '적정' : '확인 필요',
+      warning: factor.status !== 'OK',
+    })),
+    ...missingScoreFactors.map((factor) => ({
+      key: factor.key,
+      label: factor.label,
+      current: '--',
+      range: `-- ${factor.unit}`,
+      status: '수신 대기',
+      warning: true,
+    })),
+    {
+      key: 'soilMoisture',
+      label: '토양 수분',
+      current: soilMoistureReceived ? `${soilMoisture?.toLocaleString('ko-KR')}%` : '--',
+      range: '센서 유효 범위 0~100%',
+      status: soilMoistureStatus.label,
+      warning: soilMoistureStatus.warning,
+    },
+    {
+      key: 'soilTemperature',
+      label: '토양 온도',
+      current: soilTemperatureReceived ? `${soilTemperature?.toLocaleString('ko-KR', { maximumFractionDigits: 1 })}℃` : '--',
+      range: '센서 유효 범위 −20~80℃',
+      status: soilTemperatureStatus.label,
+      warning: soilTemperatureStatus.warning,
+    },
+  ];
   const issueFactors = getIssueFactors(scoreData?.factors ?? []);
   const gradeText = getGradeLabel(scoreData?.grade);
   const spaceName = device?.space?.name ?? '등록된 공간 없음';
@@ -282,35 +334,24 @@ export function DashboardScreen({
 
       <View style={[styles.dashboardBottomGrid, compact && styles.stack]}>
         <Surface flat style={styles.tablePanel}>
-          <SectionHeader title="환경 상태" description="현재 측정값과 작물별 권장 범위 비교" />
+          <SectionHeader title="환경 상태" description="현재 측정값과 작물별 권장 범위 비교 · 토양 센서 수신 상태 포함" />
           <View style={styles.tableHeader}>
             <Text style={[styles.tableHeaderText, styles.tableName]}>항목</Text>
             <Text style={styles.tableHeaderText}>현재 값</Text>
-            <Text style={styles.tableHeaderText}>권장 범위</Text>
+            <Text style={styles.tableHeaderText}>권장/유효 범위</Text>
             <Text style={styles.tableHeaderText}>상태</Text>
           </View>
-          {displayFactors.map((factor) => (
-            <View key={factor.label} style={styles.tableRow}>
-              <Text style={[styles.tableCellStrong, styles.tableName]}>{factor.label}</Text>
-              <Text style={styles.tableCell}>{factor.current.toLocaleString('ko-KR')}{factor.unit}</Text>
-              <Text style={styles.tableCell}>{factor.optimalMin.toLocaleString('ko-KR')}~{factor.optimalMax.toLocaleString('ko-KR')}{factor.unit}</Text>
-              <View style={[styles.statusBadge, factor.status !== 'OK' && styles.statusBadgeWarn]}>
-                <Text style={[styles.statusBadgeText, factor.status !== 'OK' && styles.statusBadgeTextWarn]}>
-                  {factor.status === 'OK' ? '적정' : '확인 필요'}
-                </Text>
+          {environmentStatusRows.map((row) => (
+            <View key={row.key} style={styles.tableRow}>
+              <Text style={[styles.tableCellStrong, styles.tableName]}>{row.label}</Text>
+              <Text style={styles.tableCell}>{row.current}</Text>
+              <Text style={styles.tableCell}>{row.range}</Text>
+              <View style={[styles.statusBadge, row.warning && styles.statusBadgeWarn]}>
+                <Text style={[styles.statusBadgeText, row.warning && styles.statusBadgeTextWarn]}>{row.status}</Text>
               </View>
             </View>
           ))}
-          {missingScoreFactors.map((factor) => (
-            <View key={factor.key} style={styles.tableRow}>
-              <Text style={[styles.tableCellStrong, styles.tableName]}>{factor.label}</Text>
-              <Text style={styles.tableCell}>--</Text>
-              <Text style={styles.tableCell}>-- {factor.unit}</Text>
-              <View style={[styles.statusBadge, styles.statusBadgeWarn]}>
-                <Text style={[styles.statusBadgeText, styles.statusBadgeTextWarn]}>수신 대기</Text>
-              </View>
-            </View>
-          ))}
+          <Text style={styles.tableNote}>토양 수분·토양 온도는 종합 적합도 점수에는 포함하지 않고 센서 측정값과 수신 상태로 표시합니다.</Text>
         </Surface>
 
         <Surface flat style={[styles.deviceStatusPanel, compact && styles.fullWidth]}>
@@ -406,6 +447,7 @@ const styles = StyleSheet.create(scaleTypography({
   tableRow: { alignItems: 'center', borderBottomColor: palette.line, borderBottomWidth: 1, flexDirection: 'row', minHeight: 68 },
   tableCell: { ...typeScale.body, color: palette.secondary, flex: 1, fontFamily: font },
   tableCellStrong: { ...typeScale.bodyStrong, color: palette.text, flex: 1, fontFamily: font },
+  tableNote: { ...typeScale.caption, color: palette.muted, fontFamily: font, lineHeight: 19, marginTop: 14 },
   statusBadge: { alignItems: 'center', backgroundColor: palette.greenSoft, borderRadius: 999, flex: 1, maxWidth: 104, paddingHorizontal: 8, paddingVertical: 7 },
   statusBadgeWarn: { backgroundColor: palette.amberSoft },
   statusBadgeText: { ...typeScale.label, color: palette.greenDark, fontFamily: font },

@@ -1,6 +1,8 @@
 package com.terrabyte.backend.irrigation;
 
 import java.sql.PreparedStatement;
+
+import org.springframework.dao.DuplicateKeyException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;

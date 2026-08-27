@@ -255,6 +255,8 @@ GET   /api/pots/{potId}/score                       화분 최신 환경 적합�
 GET   /api/pots/{potId}/soil-recommendation         화분 토양 배합 추천 조회
 GET   /api/pots/{potId}/crop-recommendations        화분 대체 작물 추천 조회
 GET   /api/pots/{potId}/diagnostic-history          화분 진단 이력 조회
+POST  /api/pots/{potId}/irrigation                  수동 관수 요청
+GET   /api/pots/{potId}/irrigation/timeline         관수 결정·명령 결과 이력 조회
 
 GET   /api/devices/{deviceId}/measurements/latest   기기 최신 측정값 조회 (deprecated)
 GET   /api/devices/{deviceId}/measurements          기기 측정값 시계열 조회 (deprecated)
@@ -398,9 +400,38 @@ SQLite의 `crop_score_model_config`는 프로필별 집계 모델을 불변 버�
 `crop_environment_score` 뷰와 Java API는 이 설정을 읽어 같은 가중 기하평균과 `GOOD/NORMAL/BAD` 등급을
 계산합니다. 기존 `crop_score_profile`의 `40/25/35` 열은 legacy 조화평균 데이터이므로 새 지수로 사용하지 않습니다.
 
+## 자동 제어·관수 이력
+
+`RuleEngine`은 기본 1분 간격으로 자동 제어가 활성화된 온라인 화분을 확인합니다. 자동 제어는
+`pot.auto_control_enabled`가 `true`이고 작물과 최신 측정값이 있는 화분에만 적용되며, 마이그레이션 기본값은
+`true`입니다. 현재 이 설정을 변경하는 사용자 API는 제공하지 않습니다.
+
+- 토양 수분이 `RULE_SOIL_DRY_GATE_PCT`(기본 35%) 미만이고 토양 센서값이 유효하면 관수를 요청합니다.
+  룰 엔진은 건조 상태를 감지할 뿐이며, 실제 승인·용량·쿨다운·일일 예산·측정값 신선도는 기존
+  `IrrigationGovernor`가 최종 판단합니다.
+- 조명은 `RULE_PHOTOPERIOD_START`~`RULE_PHOTOPERIOD_END`(기본 06:00~22:00) 안에서 작물 점수 프로필의
+  PPFD 적정 범위를 기준으로 켜고 끕니다. 광주기 밖에서는 조명을 끕니다.
+- `GET /api/pots/{potId}/irrigation/timeline?limit=20`은 자동·수동 관수의 승인 및 거절 사유, 연결된 명령의
+  실행 상태를 함께 반환합니다. `limit`은 1~100 사이로 제한됩니다.
+
+Orange Pi는 MQTT `dn/heartbeat`가 15분간 끊긴 경우에만 제한적인 긴급 관수를 수행할 수 있습니다. 이 관수는
+토양 수분 15% 미만, 60mL, 최소 12시간 간격, 하루 120mL 한도를 따르며 서버의 일반 자동 관수 규칙을 복제하지
+않습니다. 복구 후 게이트웨이는 `up/irrigation`으로 긴급 관수 기록을 전송하고, 백엔드는 이를
+`device_command(origin=EDGE_FALLBACK, state=COMPLETED)`로 저장해 일일 예산에 반영합니다. 기록 동기화가 끝나기
+전의 `RESYNC` 또는 `SAFE_HOLD` 상태 게이트웨이에는 명령을 발행하지 않습니다.
+
+관련 설정은 다음과 같습니다.
+
+```text
+RULE_INTERVAL_MS=60000
+RULE_SOIL_DRY_GATE_PCT=35.0
+RULE_PHOTOPERIOD_START=06:00
+RULE_PHOTOPERIOD_END=22:00
+```
+
 ## 휴대폰 푸시 알림
 
-인증 사용자는 `/api/push-tokens`로 Android FCM 토큰을 등록·교체·해제하고 `/api/notifications`에서 저장된 알림을 조회·읽음 처리할 수 있습니다. `/api/notifications/unread-count`는 목록 페이지 크기와 무관한 정확한 미확인 개수를 반환합니다. 센서 quality 장애와 MQTT 기기 오프라인 이벤트는 같은 상태가 지속되는 동안 중복 억제됩니다. 알림과 발송 작업은 원본 이벤트와 같은 트랜잭션에 저장되며, 실제 FCM 호출은 영속 delivery outbox 작업자가 제한된 배치로 처리합니다. Firebase가 비활성화되어도 알림 이력은 저장됩니다.
+인증 사용자는 `/api/push-tokens`로 Android FCM 토큰을 등록·교체·해제하고 `/api/notifications`에서 저장된 알림을 조회·읽음 처리할 수 있습니다. `/api/notifications/unread-count`는 목록 페이지 크기와 무관한 정확한 미확인 개수를 반환합니다. 센서 quality 장애와 MQTT 기기 오프라인 이벤트는 같은 상태가 지속되는 동안 중복 억제됩니다. 펌프 명령은 게이트웨이의 `completed` ACK가 도착했을 때만 관수 완료 알림을 생성하며, 조명 ACK는 이 알림을 만들지 않습니다. 알림과 발송 작업은 원본 이벤트와 같은 트랜잭션에 저장되며, 실제 FCM 호출은 영속 delivery outbox 작업자가 제한된 배치로 처리합니다. Firebase가 비활성화되어도 알림 이력은 저장됩니다.
 
 실제 FCM 전송에는 다음 환경 변수가 필요합니다.
 
