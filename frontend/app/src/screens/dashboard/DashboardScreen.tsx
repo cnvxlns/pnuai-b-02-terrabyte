@@ -21,6 +21,7 @@ import {
   useMeasurementSeries,
 } from '../../shared/device-environment/DeviceEnvironmentProvider';
 import { getGradeLabel, getIssueFactors } from '../../shared/factorPresentation';
+import { soilConditionText } from '../../soil/soilCondition';
 import { useDisclosure } from '../../shared/hooks/useDisclosure';
 
 function makeAxisLabels(points: Array<{ time: string }>, range: '1h' | '24h' | '7d' | '30d'): string[] {
@@ -52,7 +53,12 @@ export function DashboardScreen({
   const [kitSensors, setKitSensors] = useState<DeviceSensorStatus[]>([]);
   const [kitSensorsLoading, setKitSensorsLoading] = useState(false);
   const [kitSensorsError, setKitSensorsError] = useState<string | null>(null);
-  const { potId, score: scoreData, measurements: latestData } = useDeviceEnvironment();
+  const {
+    potId,
+    score: scoreData,
+    measurements: latestData,
+    soilRecommendation,
+  } = useDeviceEnvironment();
   const airTemperatureSeries = useMeasurementSeries('air_temperature_c', chartRange);
   const airHumiditySeries = useMeasurementSeries('air_humidity_pct', chartRange);
   const plantLightSeries = useMeasurementSeries('plant_light_ppfd_umol_m2_s', chartRange);
@@ -162,7 +168,9 @@ export function DashboardScreen({
       key: 'soilMoisture',
       label: '토양 수분',
       current: soilMoistureReceived ? `${soilMoisture?.toLocaleString('ko-KR')}%` : '--',
-      range: '센서 유효 범위 0~100%',
+      // 작물별 적정 토양수분 범위는 crop_score_profile 에 존재하지 않는다(설계 갭 G3).
+      // 대신 같은 화분의 관수 주기를 비교해 나온 환경 판정을 보여준다.
+      range: soilConditionText(soilRecommendation),
       status: soilMoistureStatus.label,
       warning: soilMoistureStatus.warning,
     },
@@ -170,7 +178,8 @@ export function DashboardScreen({
       key: 'soilTemperature',
       label: '토양 온도',
       current: soilTemperatureReceived ? `${soilTemperature?.toLocaleString('ko-KR', { maximumFractionDigits: 1 })}℃` : '--',
-      range: '센서 유효 범위 −20~80℃',
+      // 토양 온도는 작물별 기준도, 판정 규칙도 아직 없다. 있는 척하지 않는다.
+      range: '작물별 기준 없음',
       status: soilTemperatureStatus.label,
       warning: soilTemperatureStatus.warning,
     },
@@ -334,11 +343,11 @@ export function DashboardScreen({
 
       <View style={[styles.dashboardBottomGrid, compact && styles.stack]}>
         <Surface flat style={styles.tablePanel}>
-          <SectionHeader title="환경 상태" description="현재 측정값과 작물별 권장 범위 비교 · 토양 센서 수신 상태 포함" />
+          <SectionHeader title="환경 상태" description="현재 측정값과 작물별 권장 범위 비교 · 토양은 관수 주기로 판정" />
           <View style={styles.tableHeader}>
             <Text style={[styles.tableHeaderText, styles.tableName]}>항목</Text>
             <Text style={styles.tableHeaderText}>현재 값</Text>
-            <Text style={styles.tableHeaderText}>권장/유효 범위</Text>
+            <Text style={styles.tableHeaderText}>권장 범위 · 판정</Text>
             <Text style={styles.tableHeaderText}>상태</Text>
           </View>
           {environmentStatusRows.map((row) => (
@@ -351,7 +360,7 @@ export function DashboardScreen({
               </View>
             </View>
           ))}
-          <Text style={styles.tableNote}>토양 수분·토양 온도는 종합 적합도 점수에는 포함하지 않고 센서 측정값과 수신 상태로 표시합니다.</Text>
+          <Text style={styles.tableNote}>토양 수분·토양 온도는 종합 적합도 점수에 포함하지 않습니다. 토양 수분 판정은 고정 기준치가 아니라 같은 화분의 이전 관수 주기와 비교해 산출하며, 비교할 주기가 쌓이기 전에는 판정하지 않습니다.</Text>
         </Surface>
 
         <Surface flat style={[styles.deviceStatusPanel, compact && styles.fullWidth]}>

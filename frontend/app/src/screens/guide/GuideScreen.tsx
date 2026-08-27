@@ -11,6 +11,7 @@ import { Surface } from '../../components/Surface';
 import { getCarePlan, type CarePlan } from '../../care/carePlanApi';
 import type { Page } from '../../navigation/types';
 import { useDeviceEnvironment } from '../../shared/device-environment/DeviceEnvironmentProvider';
+import { soilConditionText } from '../../soil/soilCondition';
 
 export function GuideScreen({ compact, onNavigate }: { compact: boolean; onNavigate: (page: Page) => void }) {
   const [completedTaskIds, setCompletedTaskIds] = useState<Record<string, boolean>>({});
@@ -91,7 +92,7 @@ export function GuideScreen({ compact, onNavigate }: { compact: boolean; onNavig
         <Surface flat style={styles.guidePanel}>
           <SectionHeader
             title="토양 배합 추천"
-            description={`${soilRecommendation.cropName} 재배 기준 · ${soilRecommendation.targetCondition}`}
+            description={`${soilRecommendation.cropName} 재배 기준 · ${soilConditionText(soilRecommendation)}`}
           />
           <View style={styles.soilMixRow}>
             <Text style={styles.soilMixRatio}>{soilRecommendation.mixRatioText}</Text>
