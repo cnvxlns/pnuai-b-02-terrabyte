@@ -642,6 +642,9 @@ systemctl start terrabyte-edge
 <img src="docs/프로젝트소개.png" alt="TerraByte 프로젝트 소개" width="700" />
 
 
+> 시연 영상
+
+[<img src="https://img.youtube.com/vi/E_uX0AG3zqc/maxresdefault.jpg" alt="TerraByte 시연 영상" width="700" />](https://www.youtube.com/watch?v=E_uX0AG3zqc)
 
 <br/>
 
